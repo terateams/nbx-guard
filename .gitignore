@@ -1,0 +1,9 @@
+# Build artifacts
+zig-out/
+.zig-cache/
+
+# Local guard state (plans / backups / approvals / audit)
+.nbx-guard/
+
+# OS noise
+.DS_Store
