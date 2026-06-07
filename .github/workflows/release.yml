@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to build and release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Test
+        run: zig build test --summary all
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-macos
+          - aarch64-macos
+          - x86_64-windows
+          - aarch64-windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build (ReleaseSafe)
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe --summary all
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          target="${{ matrix.target }}"
+          name="nbx-guard-${version}-${target}"
+          mkdir -p "pkg/${name}" out
+          if [[ "$target" == *windows* ]]; then
+            cp "zig-out/bin/nbx-guard.exe" "pkg/${name}/"
+          else
+            cp "zig-out/bin/nbx-guard" "pkg/${name}/"
+          fi
+          cp README.md "pkg/${name}/"
+          if [[ "$target" == *windows* ]]; then
+            (cd pkg && zip -r "../out/${name}.zip" "${name}")
+          else
+            tar -czf "out/${name}.tar.gz" -C pkg "${name}"
+          fi
+          ls -l out
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nbx-guard-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*

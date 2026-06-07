@@ -5,5 +5,8 @@ zig-out/
 # Local guard state (plans / backups / approvals / audit)
 .nbx-guard/
 
+# mdBook output
+docs/book/
+
 # OS noise
 .DS_Store

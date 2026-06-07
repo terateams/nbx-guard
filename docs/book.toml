@@ -1,0 +1,20 @@
+[book]
+title = "nbx-guard"
+description = "Agent-only NetBox safe-change gateway, implemented in Zig."
+authors = ["terateams"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/terateams/nbx-guard"
+edit-url-template = "https://github.com/terateams/nbx-guard/edit/main/docs/{path}"
+site-url = "/nbx-guard/"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+limit-results = 20
