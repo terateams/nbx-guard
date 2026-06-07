@@ -10,7 +10,7 @@ default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/terateams/nbx-guard"
 edit-url-template = "https://github.com/terateams/nbx-guard/edit/main/docs/{path}"
-site-url = "/nbx-guard/"
+site-url = "/"
 
 [output.html.fold]
 enable = true
