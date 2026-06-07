@@ -13,7 +13,7 @@ const backup = @import("backup.zig");
 const audit = @import("audit.zig");
 const netbox = @import("netbox.zig");
 
-pub const version = "0.1.0";
+pub const version = "0.1.1";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
@@ -71,6 +71,7 @@ fn cmdVersion(ctx: *Context) !void {
         description: []const u8 = "Agent-only NetBox safe-change gateway (Zig)",
         netbox_url: []const u8,
         branching: bool,
+        branch: ?[]const u8 = null,
         state_dir: []const u8,
         token_configured: bool,
         principle: []const u8 = "Agent proposes intent; the CLI decides what is allowed.",
@@ -78,6 +79,7 @@ fn cmdVersion(ctx: *Context) !void {
     try ctx.ok("version", Info{
         .netbox_url = ctx.config.netbox_url,
         .branching = ctx.config.branching,
+        .branch = netbox.activeBranch(ctx.config),
         .state_dir = ctx.config.state_dir,
         .token_configured = ctx.config.netbox_token != null,
     });

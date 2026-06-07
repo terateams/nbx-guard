@@ -36,7 +36,7 @@ environment:
   "command": "version",
   "data": {
     "name": "nbx-guard",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Agent-only NetBox safe-change gateway (Zig)",
     "netbox_url": "http://localhost:8000",
     "branching": false,

@@ -67,5 +67,13 @@ aggregated in `root.zig`. The repository ships three GitHub Actions workflows:
 
 ## NetBox Branching
 
-`NBX_GUARD_BRANCHING` / `NBX_GUARD_BRANCH` reserve support for routing writes through the
-NetBox Branching plugin. In this MVP the default apply mechanism is a direct PATCH.
+`NBX_GUARD_BRANCHING` / `NBX_GUARD_BRANCH` route guarded changes through the
+[NetBox Branching](https://github.com/netboxlabs/netbox-branching) plugin. When both are
+set, the NetBox client adds an `X-NetBox-Branch: <schema_id>` header to every request, so
+reads, the pre-apply backup, and the apply PATCH all operate within that branch instead
+of `main`. The change therefore stays isolated until a human reviews and merges the
+branch.
+
+Branch creation and the `sync` / `merge` / `revert` lifecycle are intentionally **not**
+part of the gateway — they are approver-level operations performed via NetBox's own
+Branching API. nbx-guard only ever *targets* an existing branch; it never merges one.

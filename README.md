@@ -48,8 +48,14 @@ Set via environment (see `.env.example`):
 | `NETBOX_URL` | `http://localhost:8000` | NetBox base URL |
 | `NETBOX_TOKEN` | _(unset)_ | API token; required for `get`/`inspect`/`apply`/`restore` |
 | `NBX_GUARD_STATE_DIR` | `.nbx-guard` | Local state directory |
-| `NBX_GUARD_BRANCHING` | `0` | Route writes through NetBox Branching |
-| `NBX_GUARD_BRANCH` | _(unset)_ | Active branch schema id |
+| `NBX_GUARD_BRANCHING` | `0` | Route reads/writes through a NetBox Branching branch |
+| `NBX_GUARD_BRANCH` | _(unset)_ | Active branch schema id (sent as `X-NetBox-Branch`) |
+
+When `NBX_GUARD_BRANCHING` is enabled **and** `NBX_GUARD_BRANCH` holds a branch's
+schema id, every NetBox request carries the `X-NetBox-Branch: <schema_id>` header, so
+guarded changes land in that branch instead of `main`. Create the branch and later
+`sync`/`merge`/`revert` it via NetBox's own Branching API — those approver-level
+lifecycle actions are intentionally outside the agent gateway.
 
 ## Policy (MVP)
 
@@ -163,5 +169,7 @@ Exit codes: `0` success, `2` client/policy/state error, `3` upstream/config/IO e
 
 ## Status
 
-MVP. NetBox Branching (`diff` / `sync` / `merge`) is configurable but the direct-PATCH
-path is the default apply mechanism in this version.
+MVP. With NetBox Branching enabled, guarded changes are routed into a branch via the
+`X-NetBox-Branch` header; branch lifecycle (`sync` / `merge` / `revert`) is handled
+through NetBox's own Branching API. Without branching, the default apply mechanism is a
+direct PATCH against `main`.
