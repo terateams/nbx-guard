@@ -169,6 +169,16 @@ guard_ext() {
   GRC=$?
   set -e
 }
+# 算子在内置类型上扩展一个字段（dns_name 默认被拒，算子放行为低风险）。
+# 用于校验：自描述（describe/inspect）会同步反映算子放行的字段，避免 enforce 与 describe 不一致。
+guard_extfield() {
+  set +e
+  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
+    NBX_GUARD_ALLOWED_FIELDS="dns_name" \
+    "$GUARD" "$@" 2>/dev/null)
+  GRC=$?
+  set -e
+}
 j() { printf '%s' "$GOUT" | jq -r "$1"; }
 # 直接查 NetBox（校验副作用）
 nb_field() { curl -fsS -H "$NB_AUTH" "$BASE/api/ipam/ip-addresses/$IP_ID/" | jq -r "$1"; }
@@ -191,7 +201,7 @@ echo "================ 验收用例 ================"
 guard version
 check "version: 退出码 0" "$GRC" "0"
 check "version: ok=true" "$(j '.ok')" "true"
-check "version: 版本号" "$(j '.data.version')" "0.4.0"
+check "version: 版本号" "$(j '.data.version')" "0.4.1"
 check "version: token_configured=true" "$(j '.data.token_configured')" "true"
 
 # 2) help
@@ -355,6 +365,29 @@ check "plan site tenant(扩展高风险): requires_approval=true" "$(j '.data.pl
 guard_ext plan site "$SITE_ID" --set name=renamed
 check "plan site name(扩展类型仍拒绝): 退出码 2" "$GRC" "2"
 check "plan site name: policy_denied" "$(j '.error.kind')" "policy_denied"
+
+# 4g) 自描述与 enforce 一致性：算子在内置类型上放行的字段，describe/inspect 必须能反映出来，
+#     否则 Agent 无法发现该字段。dns_name 默认被拒，放行后应在自描述中出现并实时对齐 NetBox。
+guard describe ip-address --offline
+check "describe(无 env): dns_name 不在字段列表（默认拒绝）" \
+  "$(j '[.data.fields[].name] | index("dns_name") != null')" "false"
+
+guard_extfield describe ip-address --source options
+check "describe(算子放行): dns_name 出现且为低风险" \
+  "$(j '.data.fields[] | select(.name=="dns_name") | .class')" "allowed"
+check "describe(算子放行): dns_name 实时存在于 NetBox" \
+  "$(j '.data.fields[] | select(.name=="dns_name") | .present_in_netbox')" "true"
+
+guard_extfield inspect ip-address "$IP_ID"
+check "inspect(算子放行): allowed_fields 含 dns_name" \
+  "$(j '.data.policy.allowed_fields | index("dns_name") != null')" "true"
+
+guard_extfield plan ip-address "$IP_ID" --set dns_name=host.acceptance.local
+check "plan(算子放行 dns_name): 低风险可直接应用" "$(j '.data.plan.requires_approval')" "false"
+
+guard help
+check "help(无 env): high_risk_fields 不含 serial" \
+  "$(j '.data.high_risk_fields | index("serial") != null')" "false"
 
 # 5) token 门禁：不带 token 的 get 应被拒
 guard_notoken get ip-address "$IP_ID"
