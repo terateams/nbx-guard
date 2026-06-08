@@ -33,6 +33,9 @@ NB_AUTH="Authorization: Bearer ${TOKEN}"
 BASE="http://127.0.0.1:${PORT}"
 GUARD="$REPO_ROOT/zig-out/bin/nbxg"
 STATE_DIR="$SCRIPT_DIR/.state"
+# 隔离 HOME，使验收不读取开发者本机的 ~/.nbx-guard/config.json（否则算子配置会污染
+# 默认拒绝断言）。所有 guard* 调用都用这个空 HOME；显式用 NBX_GUARD_CONFIG 的用例不受影响。
+HHOME="$STATE_DIR/hermetic-home"
 READY_TIMEOUT="${NBX_READY_TIMEOUT:-480}"   # 等待 NetBox 就绪的秒数上限
 
 KEEP=0
@@ -87,6 +90,7 @@ fi
 # 干净的本地状态目录（rm 可能被包装为移入废纸篓，做容错处理）
 rm -rf "$STATE_DIR" 2>/dev/null || true
 mkdir -p "$STATE_DIR"
+mkdir -p "$HHOME"   # 空 HOME：隔离本机 ~/.nbx-guard/config.json，避免污染默认拒绝断言
 
 # 退出时无条件销毁
 trap teardown EXIT
@@ -146,14 +150,14 @@ fail() { printf '   \033[31m❌ FAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 # 运行 nbx-guard（注入 URL/Token/State），捕获 stdout 与退出码
 guard() {
   set +e
-  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" "$GUARD" "$@" 2>/dev/null)
+  GOUT=$(HOME="$HHOME" NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" "$GUARD" "$@" 2>/dev/null)
   GRC=$?
   set -e
 }
 # 不带 token 运行（验证 token 门禁）
 guard_notoken() {
   set +e
-  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" "$GUARD" "$@" 2>/dev/null)
+  GOUT=$(HOME="$HHOME" NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" "$GUARD" "$@" 2>/dev/null)
   GRC=$?
   set -e
 }
@@ -162,7 +166,7 @@ guard_notoken() {
 # detail 透传到 message，并给出指向凭据/权限（而非"检查资源"）的 next_action。
 guard_badtoken() {
   set +e
-  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" \
+  GOUT=$(HOME="$HHOME" NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" \
     NETBOX_TOKEN="nbt_badkey000001.deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
     "$GUARD" "$@" 2>/dev/null)
   GRC=$?
@@ -172,7 +176,7 @@ guard_badtoken() {
 # 显式放行更多受治理类型与字段（site/tenant + facility/tenant 字段）。
 guard_ext() {
   set +e
-  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
+  GOUT=$(HOME="$HHOME" NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
     NBX_GUARD_EXTRA_RESOURCES="site=dcim/sites,tenant=tenancy/tenants" \
     NBX_GUARD_ALLOWED_FIELDS="facility" \
     NBX_GUARD_HIGH_RISK_FIELDS="tenant" \
@@ -184,7 +188,7 @@ guard_ext() {
 # 用于校验：自描述（describe/inspect）会同步反映算子放行的字段，避免 enforce 与 describe 不一致。
 guard_extfield() {
   set +e
-  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
+  GOUT=$(HOME="$HHOME" NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
     NBX_GUARD_ALLOWED_FIELDS="dns_name" \
     "$GUARD" "$@" 2>/dev/null)
   GRC=$?
@@ -195,7 +199,7 @@ guard_extfield() {
 CFG_FILE="$STATE_DIR/operator-config.json"
 guard_cfgfile() {
   set +e
-  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
+  GOUT=$(HOME="$HHOME" NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
     NBX_GUARD_CONFIG="$CFG_FILE" \
     "$GUARD" "$@" 2>/dev/null)
   GRC=$?
@@ -204,9 +208,19 @@ guard_cfgfile() {
 # 配置文件 + env 并存：file 提供 site 类型，env 追加 tenant 类型，校验二者取并集。
 guard_cfgunion() {
   set +e
-  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
+  GOUT=$(HOME="$HHOME" NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
     NBX_GUARD_CONFIG="$CFG_FILE" \
     NBX_GUARD_EXTRA_RESOURCES="tenant=tenancy/tenants" \
+    "$GUARD" "$@" 2>/dev/null)
+  GRC=$?
+  set -e
+}
+# 算子开启 create（NBX_GUARD_CREATABLE_RESOURCES）。create 默认拒绝，仅放行此处列出的类型，
+# 且每次创建仍需审批；用于端到端 create -> approve -> apply(POST) -> restore(DELETE 回滚) 验证。
+guard_create() {
+  set +e
+  GOUT=$(HOME="$HHOME" NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
+    NBX_GUARD_CREATABLE_RESOURCES="vlan" \
     "$GUARD" "$@" 2>/dev/null)
   GRC=$?
   set -e
@@ -762,6 +776,53 @@ check "no_change(部分变更): 有 plan_id" "$(j '.data.plan.plan_id | length >
 # 真实变更（值不同）：仍正常建计划
 guard plan contact "$CONTACT_ID" --set title="Changed Title"
 check "no_change(异值): ok=true 仍建计划" "$(j '.ok')" "true"
+
+# 4n) create（受治理创建：类型默认拒绝 -> 算子开启 -> 始终需审批 -> apply 经 POST 创建 ->
+#     restore 经 DELETE 删除回滚）
+echo ""
+echo "-- 4n) create（受治理创建）--"
+# 未开启该类型 -> policy_denied（即便是内置类型，create 也默认拒绝）
+guard create vlan --set name=AccVlan --set vid=3999
+check "create(未开启): 退出码 2" "$GRC" "2"
+check "create(未开启): ok=false" "$(j '.ok')" "false"
+check "create(未开启): error.kind=policy_denied" "$(j '.error.kind')" "policy_denied"
+
+# 算子开启 vlan：create 生成 plan（始终 high/pending_approval，resource_id=(new)）
+guard_create create vlan --set name=AccVlan --set vid=3999
+check "create(已开启): ok=true" "$(j '.ok')" "true"
+check "create(已开启): action=create" "$(j '.data.plan.action')" "create"
+check "create(已开启): resource_id=(new)" "$(j '.data.plan.resource_id')" "(new)"
+check "create(已开启): risk=high" "$(j '.data.plan.risk_level')" "high"
+check "create(已开启): requires_approval=true" "$(j '.data.plan.requires_approval')" "true"
+check "create(已开启): status=pending_approval" "$(j '.data.plan.status')" "pending_approval"
+CREATE_PLAN=$(j '.data.plan.plan_id')
+
+# 未审批即 apply -> 拒绝
+guard_create apply --plan "$CREATE_PLAN"
+check "create apply(未审批): 退出码 2" "$GRC" "2"
+check "create apply(未审批): error.kind=not_approved" "$(j '.error.kind')" "not_approved"
+
+# approve -> apply：POST 创建，data.resource_id = NetBox 新分配 id
+guard_create approve --plan "$CREATE_PLAN" --note "acceptance create"
+check "create approve: plan_status=approved" "$(j '.data.plan_status')" "approved"
+guard_create apply --plan "$CREATE_PLAN"
+check "create apply(已审批): 退出码 0" "$GRC" "0"
+check "create apply(已审批): status=applied" "$(j '.data.status')" "applied"
+check "create apply(已审批): action=create" "$(j '.data.action')" "create"
+NEW_VLAN_ID=$(j '.data.resource_id')
+CREATE_BKP=$(j '.data.backup_id')
+check "create apply(已审批): 返回新对象 id（非 (new)）" \
+  "$([ -n "$NEW_VLAN_ID" ] && [ "$NEW_VLAN_ID" != '(new)' ] && [ "$NEW_VLAN_ID" != 'null' ] && echo yes || echo no)" "yes"
+# 直接查 NetBox：该 vlan 确已创建，vid 正确
+check "create: NetBox 侧 vlan 已创建（vid=3999）" \
+  "$(curl -fsS -H "$NB_AUTH" "$BASE/api/ipam/vlans/$NEW_VLAN_ID/" | jq -r '.vid')" "3999"
+
+# restore：撤销创建 = DELETE，NetBox 侧对象消失
+guard_create restore --backup "$CREATE_BKP"
+check "create restore: 退出码 0" "$GRC" "0"
+check "create restore: action=delete" "$(j '.data.action')" "delete"
+check "create restore: NetBox 侧 vlan 已删除（404）" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H "$NB_AUTH" "$BASE/api/ipam/vlans/$NEW_VLAN_ID/")" "404"
 
 # --- 汇总 ------------------------------------------------------------------
 echo ""

@@ -36,7 +36,8 @@ flowchart LR
 - **读取最小化（read minimization）**——读取也分级：`get`/`inspect` 默认 `--fields basic`，
   把读敏感字段（如 `phone`/`email`/`comments`/`custom_fields`/`tenant`）**脱敏**；要整对象读取
   （`--fields all`）须走 `--plan-read → approve-read` 审批路径，整个披露过程进审计。
-- **无原始访问 / 无删除**——只允许 `update`；`delete` / `bulk_delete` / 原始 API 访问都不暴露。
+- **受治理的创建**——`create` 默认拒绝；仅对算子在 `creatable_resources`（`*`=任意类型）开启的类型放行，且**每次创建都需审批**，可经 `restore` 删除回滚。
+- **无原始访问 / 无删除动作**——不暴露面向 agent 的 `delete` / `bulk_delete` / 原始 API；`DELETE` 仅供 `restore` 回滚一次创建时内部使用。
 - **对 agent 友好的 JSON**——每条命令都打印一个信封，含 `ok`、`data`，以及携带 `kind`、`risk_level`、`next_action` 的 `error`。
 - **自描述（self-describe）**——`describe` 让 agent 在动手前了解每个类型能改什么、输入输出 schema，并把字段元数据实时对齐真实 NetBox（`OPTIONS` 或官方 `OpenAPI` 描述文件）。
 
@@ -89,6 +90,7 @@ bash scripts/installer.sh
 | `NBX_GUARD_ALLOWED_FIELDS` | _（未设置）_ | **算子**追加的低风险字段（逗号/空格分隔） |
 | `NBX_GUARD_HIGH_RISK_FIELDS` | _（未设置）_ | **算子**追加的高风险字段（需审批） |
 | `NBX_GUARD_READ_SENSITIVE_FIELDS` | _（未设置）_ | **算子**追加的读敏感字段（整对象读取需 `approve-read`） |
+| `NBX_GUARD_CREATABLE_RESOURCES` | _（未设置）_ | **算子**开启 `create` 的类型（`*`=任意类型；创建仍逐次审批） |
 | `NBX_GUARD_CONFIG` | _（未设置）_ | **算子**配置文件路径覆盖；默认 `~/.nbx-guard/config.json` |
 
 > **算子配置文件（更友好）**：不想导出上面三个治理扩展变量，可改用一个 JSON 文件
@@ -153,6 +155,7 @@ nbxg snapshot <type> <id> [--fields basic|all] [--plan-read] [--plan <id>] [--ou
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：可写字段 / 输入输出 schema，实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
+nbxg create <type> --set k=v ...      创建新对象的计划（仅限算子开启的类型；始终需审批）
 nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
 nbxg approve-read --plan <id> [--note x]  审批一次敏感对象的整体读取（绑定 plan_hash）
 nbxg reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）

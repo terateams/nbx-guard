@@ -28,9 +28,33 @@ pub const read_redaction = "[redacted: read approval required]";
 
 pub const ReadClass = enum { basic, sensitive };
 
-/// Only `update` is permitted. `create`/`delete`/`bulk_delete` are refused.
+/// Only `update` is permitted by the built-in action policy. `create` is gated
+/// separately by operator opt-in (see `creatableAllowed`); `delete`/`bulk_delete`
+/// are never exposed as agent actions (delete is used only to roll back a create).
 pub fn actionAllowed(action: []const u8) bool {
     return std.mem.eql(u8, action, "update");
+}
+
+/// True when the operator has opted `resource_type` into `create` via
+/// `NBX_GUARD_CREATABLE_RESOURCES` (config.json `creatable_resources`). Default
+/// deny: an empty/unset list permits no creates. A `*` entry permits any
+/// registered type. Creation is always approval-gated regardless of this gate.
+pub fn creatableAllowed(env: *const EnvMap, resource_type: []const u8) bool {
+    if (envListHas(env, "NBX_GUARD_CREATABLE_RESOURCES", "*")) return true;
+    return envListHas(env, "NBX_GUARD_CREATABLE_RESOURCES", resource_type);
+}
+
+/// The operator-configured creatable-type tokens (as written, may include `*`),
+/// for self-description. Empty slice when creation is not enabled.
+pub fn effectiveCreatableResources(arena: std.mem.Allocator, env: *const EnvMap) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    if (env.get("NBX_GUARD_CREATABLE_RESOURCES")) |spec| {
+        var it = std.mem.tokenizeAny(u8, spec, ", \t");
+        while (it.next()) |tok| {
+            if (!listHas(list.items, tok)) try list.append(arena, tok);
+        }
+    }
+    return list.toOwnedSlice(arena);
 }
 
 /// Classify a field for *read exposure* (built-in lists only). Sensitive fields
@@ -262,6 +286,31 @@ test "delete action refused" {
     try testing.expect(!actionAllowed("delete"));
     try testing.expect(!actionAllowed("bulk_delete"));
     try testing.expect(actionAllowed("update"));
+}
+
+test "create is default-deny and opt-in per type (with wildcard)" {
+    const a = testing.allocator;
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+
+    // No opt-in: every type denied.
+    try testing.expect(!creatableAllowed(&env, "site"));
+
+    // Explicit opt-in only enables the listed types.
+    try env.put("NBX_GUARD_CREATABLE_RESOURCES", "site, vlan");
+    try testing.expect(creatableAllowed(&env, "site"));
+    try testing.expect(creatableAllowed(&env, "vlan"));
+    try testing.expect(!creatableAllowed(&env, "device"));
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const listed = try effectiveCreatableResources(arena.allocator(), &env);
+    try testing.expectEqual(@as(usize, 2), listed.len);
+
+    // Wildcard enables any registered type.
+    try env.put("NBX_GUARD_CREATABLE_RESOURCES", "*");
+    try testing.expect(creatableAllowed(&env, "device"));
+    try testing.expect(creatableAllowed(&env, "anything"));
 }
 
 test "operator env extends the allow-list without weakening defaults" {

@@ -23,6 +23,12 @@ const exit_ok: u8 = 0;
 const exit_client: u8 = 2;
 const exit_upstream: u8 = 3;
 
+// Placeholder resource id for a `create` plan: the object has no id until it is
+// applied (POSTed). It is part of the plan_hash, so the same sentinel is used at
+// plan time and at the apply-time integrity recheck. The real id is recorded in
+// the backup and the apply output once NetBox assigns it.
+const create_sentinel_id = "(new)";
+
 pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
     if (try applyOperatorConfig(ctx)) |code| return code;
     if (args.len < 2) {
@@ -48,6 +54,8 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
         return cmdDescribe(ctx, rest);
     } else if (eq(cmd, "plan")) {
         return cmdPlan(ctx, rest);
+    } else if (eq(cmd, "create")) {
+        return cmdCreate(ctx, rest);
     } else if (eq(cmd, "approve")) {
         return cmdApprove(ctx, rest);
     } else if (eq(cmd, "approve-read")) {
@@ -189,6 +197,7 @@ const EnvHelp = struct {
         .{ .name = "NBX_GUARD_ALLOWED_FIELDS", .default = "(unset)", .example = "serial,asset_tag", .purpose = "Allow more fields to be written without approval (low risk). config.json key: allowed_fields." },
         .{ .name = "NBX_GUARD_HIGH_RISK_FIELDS", .default = "(unset)", .example = "tenant", .purpose = "Allow more fields to be written, but require an approval first. config.json key: high_risk_fields." },
         .{ .name = "NBX_GUARD_READ_SENSITIVE_FIELDS", .default = "(unset)", .example = "comments", .purpose = "Treat more fields as sensitive: hidden on read unless you run approve-read. config.json key: read_sensitive_fields." },
+        .{ .name = "NBX_GUARD_CREATABLE_RESOURCES", .default = "(unset)", .example = "site,vlan or *", .purpose = "Allow `nbxg create` to make new objects of these types (default: none). Use * for any type. Every create still needs approval. config.json key: creatable_resources." },
     },
 };
 
@@ -223,6 +232,7 @@ fn printHelp(ctx: *Context) !void {
             "describe [<type>] [--source options|openapi] [--refresh] [--offline]",
             "                                 Self-describe a type: action, fields, I/O schema (live-synced to NetBox)",
             "plan <type> <id> --set k=v ...   Create a change plan (policy + risk checked)",
+            "create <type> --set k=v ...      Plan creating a NEW object (opt-in type; always needs approval)",
             "approve --plan <id> [--note x]   Approve a high-risk plan (binds plan_hash)",
             "approve-read --plan <id> [--note x]  Approve a full read of a sensitive object (binds plan_hash)",
             "reject --plan <id> [--note x]    Reject a plan so it can never be applied",
@@ -232,6 +242,7 @@ fn printHelp(ctx: *Context) !void {
             "list <plans|approvals|backups>   List local state",
         },
         resource_types: []const []const u8,
+        creatable_resources: []const []const u8,
         allowed_fields: []const []const u8,
         high_risk_fields: []const []const u8,
         read_sensitive_fields: []const []const u8,
@@ -240,6 +251,7 @@ fn printHelp(ctx: *Context) !void {
     };
     try ctx.ok("help", Help{
         .resource_types = try types.toOwnedSlice(ctx.arena),
+        .creatable_resources = try policy.effectiveCreatableResources(ctx.arena, ctx.env),
         .allowed_fields = ef.allowed,
         .high_risk_fields = ef.high_risk,
         .read_sensitive_fields = try policy.effectiveReadSensitiveFields(ctx.arena, ctx.env),
@@ -1048,7 +1060,13 @@ fn cmdDescribe(ctx: *Context, rest: []const [:0]const u8) !u8 {
         .display = doc.display,
         .summary = doc.summary,
         .action = "update",
-        .denied_actions = &[_][]const u8{ "create", "delete", "bulk_delete" },
+        .creatable = policy.creatableAllowed(ctx.env, doc.key),
+        .create = .{
+            .enabled = policy.creatableAllowed(ctx.env, doc.key),
+            .command = "nbxg create <type> --set field=value ...  (then approve + apply)",
+            .note = "create requires operator opt-in (creatable_resources / NBX_GUARD_CREATABLE_RESOURCES) and always needs approval; fields pass through to NetBox, so set the required identifying fields (e.g. name, slug).",
+        },
+        .denied_actions = &[_][]const u8{ "delete", "bulk_delete" },
         .default_policy = "deny: only the fields below are writable",
         .fields = fields.items,
         .input = .{
@@ -1130,7 +1148,11 @@ fn describeCatalog(ctx: *Context) !u8 {
     try ctx.ok("describe", .{
         .principle = "Agent proposes intent; the CLI decides what is allowed.",
         .action = "update",
-        .denied_actions = &[_][]const u8{ "create", "delete", "bulk_delete" },
+        .create_policy = .{
+            .enabled_types = try policy.effectiveCreatableResources(ctx.arena, ctx.env),
+            .note = "create is default-deny: only types listed in creatable_resources (or \"*\") may be created, and every create requires approval. `enabled_types` empty = no type may be created.",
+        },
+        .denied_actions = &[_][]const u8{ "delete", "bulk_delete" },
         .default_policy = "deny: only explicitly classified fields are writable",
         .read_policy = .{
             .tiers = &[_][]const u8{ "basic", "all" },
@@ -1383,6 +1405,93 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
         .plan = p,
         .evaluation = eval,
         .next_action = next_action,
+    });
+    return exit_ok;
+}
+
+// ---------------------------------------------------------------------------
+// create (governed object creation: opt-in type + mandatory approval)
+// ---------------------------------------------------------------------------
+
+fn cmdCreate(ctx: *Context, rest: []const [:0]const u8) !u8 {
+    if (rest.len < 1) {
+        try ctx.fail("create", .{
+            .kind = .invalid_args,
+            .message = "expected <type> --set field=value ...",
+            .next_action = "example: nbxg create site --set name=POP3 --set slug=pop3   (see `nbxg describe <type>` for fields)",
+        });
+        return exit_client;
+    }
+    const rtype = rest[0];
+    if (netbox.endpointFor(ctx.env, rtype) == null) return failUnknownType(ctx, "create", rtype);
+
+    // Type-level opt-in (default-deny): an operator must list the type in
+    // `creatable_resources` (config.json) / NBX_GUARD_CREATABLE_RESOURCES. Unlike
+    // update, create does not apply per-field policy — a new object needs its
+    // identifying/required fields (name, slug, …) that are not in allowed_fields.
+    // The governance for create is the type opt-in plus the mandatory approval,
+    // backup-as-delete rollback, and audit trail below.
+    if (!policy.creatableAllowed(ctx.env, rtype)) {
+        try ctx.fail("create", .{
+            .kind = .policy_denied,
+            .message = "creating this resource type is not permitted (default-deny)",
+            .next_action = "an operator must allow it: add the type to \"creatable_resources\" in ~/.nbx-guard/config.json (or set NBX_GUARD_CREATABLE_RESOURCES). Use \"*\" to allow any type. Every create still needs approval.",
+        });
+        return exit_client;
+    }
+
+    const changes = try parseSet(ctx.arena, rest[1..]);
+    if (changes.len == 0) {
+        try ctx.fail("create", .{
+            .kind = .invalid_args,
+            .message = "no fields given; use --set field=value",
+            .next_action = "add at least one --set field=value (NetBox enforces which fields are required)",
+        });
+        return exit_client;
+    }
+    const changes_value = try plan.buildChanges(ctx.arena, changes);
+
+    const store = Store.init(ctx);
+    try store.ensureDirs();
+    const lock = try store.acquireLock();
+    defer lock.release();
+
+    const now_ns = ctx.nowNanos();
+    const p: plan.Plan = .{
+        .plan_id = try ids.genId(ctx.arena, "plan", now_ns),
+        .request_id = try ids.genId(ctx.arena, "req", now_ns),
+        .plan_hash = try plan.computeHash(ctx.arena, rtype, create_sentinel_id, "create", changes_value),
+        .resource_type = rtype,
+        .resource_id = create_sentinel_id,
+        .action = "create",
+        .changes = changes_value,
+        // Creating a new object is always treated as high-risk: it must be
+        // approved by a human before the POST. base_values stays null (nothing
+        // existed beforehand, so there is no drift baseline).
+        .risk_level = "high",
+        .requires_approval = true,
+        .status = plan.status_pending_approval,
+        .created_at = nsToSecs(now_ns),
+        .netbox_url = ctx.config.netbox_url,
+        .base_values = .{ .null = {} },
+    };
+    try plan.save(store, p);
+
+    try audit.append(store, .{
+        .ts = p.created_at,
+        .request_id = p.request_id,
+        .event = "plan_created",
+        .plan_id = p.plan_id,
+        .resource_type = rtype,
+        .resource_id = create_sentinel_id,
+        .risk_level = p.risk_level,
+        .detail = "create",
+    });
+
+    try ctx.ok("create", .{
+        .plan = p,
+        .note = "create is approval-gated: review every field, then approve and apply",
+        .next_action = "run `nbxg approve --plan <plan_id>`, then `nbxg apply --plan <plan_id>`",
     });
     return exit_ok;
 }
@@ -1676,16 +1785,30 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
         }
     }
 
-    // Re-validate policy on the stored changes (defense in depth).
+    // Re-validate the stored plan (defense in depth). `create` is gated by type
+    // opt-in (no per-field policy — a new object needs identifying fields that are
+    // not in the writable allow-list); `update` re-checks field policy.
+    const is_create = eq(p.action, "create");
     const fields = try plan.changeFields(ctx.arena, p.changes);
-    const eval = try policy.evaluateEnv(ctx.arena, ctx.env, fields);
-    if (eval.decision == .deny) {
-        try ctx.fail("apply", .{
-            .kind = .policy_denied,
-            .message = "stored plan violates policy and will not be applied",
-            .next_action = "discard this plan",
-        });
-        return exit_client;
+    if (is_create) {
+        if (!policy.creatableAllowed(ctx.env, p.resource_type)) {
+            try ctx.fail("apply", .{
+                .kind = .policy_denied,
+                .message = "creating this resource type is no longer permitted (default-deny)",
+                .next_action = "discard this plan, or re-enable the type in creatable_resources",
+            });
+            return exit_client;
+        }
+    } else {
+        const eval = try policy.evaluateEnv(ctx.arena, ctx.env, fields);
+        if (eval.decision == .deny) {
+            try ctx.fail("apply", .{
+                .kind = .policy_denied,
+                .message = "stored plan violates policy and will not be applied",
+                .next_action = "discard this plan",
+            });
+            return exit_client;
+        }
     }
 
     var client = netbox.Client.init(ctx);
@@ -1693,6 +1816,88 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     const now_ns = ctx.nowNanos();
     const request_id = try ids.genId(ctx.arena, "req", now_ns);
+
+    // create: POST a new object. There is no prior state to snapshot or drift to
+    // check; the "backup" records the created id so a restore can DELETE it.
+    if (is_create) {
+        const body = try std.json.Stringify.valueAlloc(ctx.gpa, p.changes, .{});
+        defer ctx.gpa.free(body);
+        const post_res = client.create(p.resource_type, body) catch |err| {
+            try audit.append(store, .{
+                .ts = nsToSecs(ctx.nowNanos()),
+                .request_id = request_id,
+                .event = "apply_failed",
+                .plan_id = p.plan_id,
+                .resource_type = p.resource_type,
+                .resource_id = p.resource_id,
+                .risk_level = p.risk_level,
+                .detail = @errorName(err),
+            });
+            return failNetboxConn(ctx, "apply", err);
+        };
+        defer ctx.gpa.free(post_res.body);
+        if (!post_res.ok) {
+            try audit.append(store, .{
+                .ts = nsToSecs(ctx.nowNanos()),
+                .request_id = request_id,
+                .event = "apply_failed",
+                .plan_id = p.plan_id,
+                .resource_type = p.resource_type,
+                .resource_id = p.resource_id,
+                .risk_level = p.risk_level,
+                .detail = "netbox rejected the create",
+            });
+            return failNetboxStatus(ctx, "apply", post_res);
+        }
+
+        const created = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, post_res.body, .{}) catch
+            std.json.Value{ .null = {} };
+        const created_id = createdObjectId(ctx.arena, created) orelse create_sentinel_id;
+
+        const b: backup.Backup = .{
+            .backup_id = try ids.genId(ctx.arena, "bkp", now_ns),
+            .plan_id = p.plan_id,
+            .resource_type = p.resource_type,
+            .resource_id = created_id,
+            .snapshot = created,
+            .prior_values = .{ .null = {} },
+            .created_at = nsToSecs(now_ns),
+            .netbox_url = ctx.config.netbox_url,
+            .action = "create",
+        };
+        try backup.save(store, b);
+
+        // Keep the plan's resource_id as the sentinel so it still hashes to its
+        // plan_hash; the real id lives in the backup, audit, and this output.
+        p.status = plan.status_applied;
+        p.backup_id = b.backup_id;
+        try plan.save(store, p);
+
+        try audit.append(store, .{
+            .ts = nsToSecs(ctx.nowNanos()),
+            .request_id = request_id,
+            .event = "applied",
+            .plan_id = p.plan_id,
+            .approval_id = p.approval_id,
+            .backup_id = b.backup_id,
+            .resource_type = p.resource_type,
+            .resource_id = created_id,
+            .risk_level = p.risk_level,
+            .detail = "create",
+        });
+
+        try ctx.ok("apply", .{
+            .request_id = request_id,
+            .plan_id = p.plan_id,
+            .backup_id = b.backup_id,
+            .status = p.status,
+            .action = "create",
+            .resource_id = created_id,
+            .resource = created,
+            .next_action = "verify in NetBox; to roll back (delete the created object) run `nbxg restore --backup <backup_id>`",
+        });
+        return exit_ok;
+    }
 
     // 1. snapshot current state for backup + conflict detection
     const get_res = client.get(p.resource_type, p.resource_id) catch |err| return failNetboxConn(ctx, "apply", err);
@@ -1818,6 +2023,39 @@ fn cmdRestore(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     var client = netbox.Client.init(ctx);
     defer client.deinit();
+
+    // Roll back a create by DELETING the object it produced (it did not exist
+    // before, so its rollback is removal). Update backups restore via PATCH.
+    if (eq(b.action, "create")) {
+        const del_res = client.delete(b.resource_type, b.resource_id) catch |err| return failNetboxConn(ctx, "restore", err);
+        defer ctx.gpa.free(del_res.body);
+        // 404 means the object is already gone — treat the rollback as satisfied.
+        if (!del_res.ok and del_res.status != 404) return failNetboxStatus(ctx, "restore", del_res);
+
+        const now_ns = ctx.nowNanos();
+        const request_id = try ids.genId(ctx.arena, "req", now_ns);
+        try audit.append(store, .{
+            .ts = nsToSecs(now_ns),
+            .request_id = request_id,
+            .event = "restored",
+            .plan_id = b.plan_id,
+            .backup_id = b.backup_id,
+            .resource_type = b.resource_type,
+            .resource_id = b.resource_id,
+            .detail = "delete (rollback of create)",
+        });
+
+        try ctx.ok("restore", .{
+            .request_id = request_id,
+            .backup_id = b.backup_id,
+            .action = "delete",
+            .resource_type = b.resource_type,
+            .resource_id = b.resource_id,
+            .deleted = true,
+            .next_action = "verify in NetBox: the created object has been removed",
+        });
+        return exit_ok;
+    }
 
     const write_values = try backup.toWriteForm(ctx.arena, b.prior_values);
     const body = try std.json.Stringify.valueAlloc(ctx.gpa, write_values, .{});
@@ -2996,6 +3234,21 @@ fn isNull(v: std.json.Value) bool {
     return switch (v) {
         .null => true,
         else => false,
+    };
+}
+
+/// Extract a created object's `id` as a string (NetBox returns it as an integer
+/// on POST). Returns null when the body is not an object or has no usable id.
+fn createdObjectId(arena: std.mem.Allocator, created: std.json.Value) ?[]const u8 {
+    const obj = switch (created) {
+        .object => |o| o,
+        else => return null,
+    };
+    const idv = obj.get("id") orelse return null;
+    return switch (idv) {
+        .integer => |n| std.fmt.allocPrint(arena, "{d}", .{n}) catch null,
+        .string => |s| s,
+        else => null,
     };
 }
 

@@ -15,6 +15,10 @@ pub const Backup = struct {
     prior_values: std.json.Value,
     created_at: i64,
     netbox_url: []const u8,
+    /// The action this backup rolls back. `update` (default) restores via PATCH
+    /// of `prior_values`; `create` rolls back via DELETE of `resource_id`
+    /// (the object did not exist before, so its rollback is removal).
+    action: []const u8 = "update",
 };
 
 pub fn save(store: Store, backup: Backup) !void {

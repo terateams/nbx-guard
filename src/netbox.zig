@@ -110,6 +110,18 @@ pub const Client = struct {
         return self.request(.PATCH, resource_type, id, body);
     }
 
+    /// `POST` a new object to the collection endpoint. Used by `apply` for
+    /// `create` plans; NetBox returns the created object (including its new id).
+    pub fn create(self: *Client, resource_type: []const u8, body: []const u8) !Result {
+        return self.request(.POST, resource_type, null, body);
+    }
+
+    /// `DELETE` an object by id. Used by `restore` to roll back a create
+    /// (the rollback of a creation is deletion). NetBox returns 204 No Content.
+    pub fn delete(self: *Client, resource_type: []const u8, id: []const u8) !Result {
+        return self.request(.DELETE, resource_type, id, null);
+    }
+
     /// `OPTIONS` the collection endpoint to retrieve DRF field metadata
     /// (types, choices, required, help_text) for the live NetBox instance.
     /// Used by `describe` to keep the reported schema in sync with NetBox.
