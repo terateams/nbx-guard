@@ -14,7 +14,7 @@ const backup = @import("backup.zig");
 const audit = @import("audit.zig");
 const netbox = @import("netbox.zig");
 
-pub const version = "0.4.0";
+pub const version = "0.4.1";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
@@ -95,6 +95,11 @@ fn cmdVersion(ctx: *Context) !void {
 }
 
 fn printHelp(ctx: *Context) !void {
+    const ef = try policy.effectiveFields(ctx.arena, ctx.env);
+    var types: std.ArrayList([]const u8) = .empty;
+    try types.appendSlice(ctx.arena, &.{ "device", "interface", "ip-address", "prefix", "vlan", "contact" });
+    for (try envExtraResources(ctx)) |ex| try types.append(ctx.arena, ex.key);
+
     const Help = struct {
         name: []const u8 = "nbxg",
         version: []const u8 = version,
@@ -118,9 +123,9 @@ fn printHelp(ctx: *Context) !void {
             "audit [--plan <id>]              Show the audit log",
             "list <plans|approvals|backups>   List local state",
         },
-        resource_types: []const []const u8 = &.{ "device", "interface", "ip-address", "prefix", "vlan", "contact" },
-        allowed_fields: []const []const u8 = &policy.allowed_fields,
-        high_risk_fields: []const []const u8 = &policy.high_risk_fields,
+        resource_types: []const []const u8,
+        allowed_fields: []const []const u8,
+        high_risk_fields: []const []const u8,
         env: []const []const u8 = &.{
             "NETBOX_URL            NetBox base URL (default http://localhost:8000)",
             "NETBOX_TOKEN          NetBox API token (required for plan/get/inspect/apply/restore)",
@@ -134,7 +139,11 @@ fn printHelp(ctx: *Context) !void {
         },
         principle: []const u8 = "Agent proposes intent; the CLI decides what is allowed.",
     };
-    try ctx.ok("help", Help{});
+    try ctx.ok("help", Help{
+        .resource_types = try types.toOwnedSlice(ctx.arena),
+        .allowed_fields = ef.allowed,
+        .high_risk_fields = ef.high_risk,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -168,13 +177,14 @@ fn cmdGet(ctx: *Context, rest: []const [:0]const u8, comptime command: []const u
         std.json.Value{ .null = {} };
 
     if (eq(command, "inspect")) {
+        const ef = try policy.effectiveFields(ctx.arena, ctx.env);
         try ctx.ok(command, .{
             .resource_type = rtype,
             .resource_id = rid,
             .resource = resource,
             .policy = .{
-                .allowed_fields = &policy.allowed_fields,
-                .high_risk_fields = &policy.high_risk_fields,
+                .allowed_fields = ef.allowed,
+                .high_risk_fields = ef.high_risk,
                 .note = "Other fields are denied by default. High-risk fields require approval.",
             },
         });
@@ -258,6 +268,36 @@ fn cmdDescribe(ctx: *Context, rest: []const [:0]const u8) !u8 {
             .name = fname,
             .class = "high_risk",
             .requires_approval = true,
+            .json_type = fd.json_type,
+            .example = fd.example,
+            .note = fd.note,
+        });
+    }
+    // Operator env additions (NBX_GUARD_ALLOWED_FIELDS / *_HIGH_RISK_FIELDS) are
+    // honored globally by the policy engine, so the self-description must surface
+    // them too — otherwise the agent can't discover a field the operator enabled.
+    // The live sync below annotates whether each is actually present on this type.
+    for (try envFieldList(ctx, "NBX_GUARD_HIGH_RISK_FIELDS")) |fname| {
+        if (describeHasField(fields.items, fname)) continue;
+        if (policy.classifyFieldEnv(ctx.env, fname) != .high_risk) continue;
+        const fd = schema.fieldDoc(fname) orelse genericFieldDoc(ctx, fname);
+        try fields.append(ctx.arena, .{
+            .name = fname,
+            .class = "high_risk",
+            .requires_approval = true,
+            .json_type = fd.json_type,
+            .example = fd.example,
+            .note = fd.note,
+        });
+    }
+    for (try envFieldList(ctx, "NBX_GUARD_ALLOWED_FIELDS")) |fname| {
+        if (describeHasField(fields.items, fname)) continue;
+        if (policy.classifyFieldEnv(ctx.env, fname) != .allowed) continue;
+        const fd = schema.fieldDoc(fname) orelse genericFieldDoc(ctx, fname);
+        try fields.append(ctx.arena, .{
+            .name = fname,
+            .class = "allowed",
+            .requires_approval = false,
             .json_type = fd.json_type,
             .example = fd.example,
             .note = fd.note,
@@ -1339,6 +1379,11 @@ fn syntheticDoc(ctx: *Context, key: []const u8) !?schema.ResourceDoc {
 
 fn inList(list: []const []const u8, name: []const u8) bool {
     for (list) |x| if (eq(x, name)) return true;
+    return false;
+}
+
+fn describeHasField(list: []const DescribeField, name: []const u8) bool {
+    for (list) |f| if (eq(f.name, name)) return true;
     return false;
 }
 
