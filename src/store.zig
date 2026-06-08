@@ -38,6 +38,26 @@ pub const Store = struct {
         return true;
     }
 
+    /// Advisory lock guarding all state mutations. Held for the duration of a
+    /// mutating command so concurrent invocations serialize instead of racing
+    /// (which could lose audit entries or double-apply). Released on `release`,
+    /// and automatically by the OS if the process dies.
+    pub const Lock = struct {
+        file: std.Io.File,
+        io: std.Io,
+        pub fn release(self: Lock) void {
+            self.file.close(self.io);
+        }
+    };
+
+    /// Acquire the exclusive state lock, creating `<state_dir>/.lock` if needed.
+    /// Blocks until the lock is available. Call `ensureDirs` first.
+    pub fn acquireLock(self: Store) !Lock {
+        const p = try self.path(&.{".lock"});
+        const file = try self.dir().createFile(self.ctx.io, p, .{ .truncate = false, .lock = .exclusive });
+        return .{ .file = file, .io = self.ctx.io };
+    }
+
     /// Read an entire file, or `null` if it does not exist. Caller owns memory.
     pub fn readAlloc(self: Store, rel: []const u8) !?[]u8 {
         return self.dir().readFileAlloc(self.ctx.io, rel, self.ctx.gpa, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
@@ -46,8 +66,21 @@ pub const Store = struct {
         };
     }
 
+    /// Write `data` to `rel` atomically: stream into a temp file, then rename it
+    /// over the target. A crash mid-write therefore never leaves a torn file
+    /// (a truncated backup would mean an unrecoverable rollback), and readers
+    /// always observe either the old or the new file, never a partial one.
     pub fn writeBytes(self: Store, rel: []const u8, data: []const u8) !void {
-        try self.dir().writeFile(self.ctx.io, .{ .sub_path = rel, .data = data });
+        const io = self.ctx.io;
+        const d = self.dir();
+        const tmp = try std.fmt.allocPrint(self.ctx.arena, "{s}.tmp.{d}", .{ rel, self.ctx.nowNanos() });
+        errdefer d.deleteFile(io, tmp) catch {};
+        {
+            var file = try d.createFile(io, tmp, .{});
+            defer file.close(io);
+            try file.writeStreamingAll(io, data);
+        }
+        try d.rename(tmp, d, rel, io);
     }
 
     /// Serialize `value` as pretty JSON and write it to `rel` (truncating).

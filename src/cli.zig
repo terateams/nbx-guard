@@ -221,6 +221,8 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     const store = Store.init(ctx);
     try store.ensureDirs();
+    const lock = try store.acquireLock();
+    defer lock.release();
 
     const now_ns = ctx.nowNanos();
     const p: plan.Plan = .{
@@ -273,6 +275,8 @@ fn cmdApprove(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     const store = Store.init(ctx);
     try store.ensureDirs();
+    const lock = try store.acquireLock();
+    defer lock.release();
 
     const loaded = (try plan.load(store, plan_id)) orelse return failPlanNotFound(ctx, "approve", plan_id);
     defer loaded.deinit();
@@ -336,6 +340,8 @@ fn cmdReject(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     const store = Store.init(ctx);
     try store.ensureDirs();
+    const lock = try store.acquireLock();
+    defer lock.release();
 
     const loaded = (try plan.load(store, plan_id)) orelse return failPlanNotFound(ctx, "reject", plan_id);
     defer loaded.deinit();
@@ -392,6 +398,8 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     const store = Store.init(ctx);
     try store.ensureDirs();
+    const lock = try store.acquireLock();
+    defer lock.release();
 
     const loaded = (try plan.load(store, plan_id)) orelse return failPlanNotFound(ctx, "apply", plan_id);
     defer loaded.deinit();
@@ -579,6 +587,8 @@ fn cmdRestore(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     const store = Store.init(ctx);
     try store.ensureDirs();
+    const lock = try store.acquireLock();
+    defer lock.release();
 
     const loaded = (try backup.load(store, backup_id)) orelse {
         try ctx.fail("restore", .{
@@ -594,7 +604,8 @@ fn cmdRestore(ctx: *Context, rest: []const [:0]const u8) !u8 {
     var client = netbox.Client.init(ctx);
     defer client.deinit();
 
-    const body = try std.json.Stringify.valueAlloc(ctx.gpa, b.prior_values, .{});
+    const write_values = try backup.toWriteForm(ctx.arena, b.prior_values);
+    const body = try std.json.Stringify.valueAlloc(ctx.gpa, write_values, .{});
     defer ctx.gpa.free(body);
 
     const res = client.patch(b.resource_type, b.resource_id, body) catch |err| return failNetboxConn(ctx, "restore", err);
@@ -619,7 +630,7 @@ fn cmdRestore(ctx: *Context, rest: []const [:0]const u8) !u8 {
     try ctx.ok("restore", .{
         .request_id = request_id,
         .backup_id = b.backup_id,
-        .restored_values = b.prior_values,
+        .restored_values = write_values,
         .resource = restored,
         .next_action = "verify in NetBox",
     });

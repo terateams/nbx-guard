@@ -45,8 +45,10 @@ amd64 镜像）。触发时机：
 
 ## 说明
 
-- NetBox 固定到 **4.2（`netbox-docker` 3.2.1）**，沿用经典 API Token 机制，
-  与 nbx-guard 的 `Authorization: Token <token>` 兼容。
+- NetBox 固定到 **4.5.1（`netbox-docker` 3.4.2，与生产环境一致）**。NetBox 4.5 默认
+  签发 v2 Token（凭据形如 `nbt_<key>.<secret>`，以 `Bearer` 鉴权）；harness 会配置
+  `API_TOKEN_PEPPER_1` 并在就绪后植入一个确定性的 v2 Token，nbx-guard 依据 `nbt_`
+  前缀自动改用 Bearer 方案（同时仍兼容旧版 v1 `Token`）。
 - 固定项目名 `nbx-guard-acceptance` + 每次启动前后都 `down -v`，
   保证干净初始状态与可重复性。
 - 只依赖 `docker` / `zig` / `jq` / `curl`。

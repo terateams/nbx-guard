@@ -29,6 +29,16 @@ pub fn endpoint(resource_type: []const u8) ?[]const u8 {
     return null;
 }
 
+/// NetBox v2 API tokens (NetBox 4.5+) are presented as `nbt_<key>.<secret>`
+/// and authenticate with the `Bearer` scheme; legacy v1 tokens (the 40-char
+/// value) use `Token`. NetBox infers the version from the `nbt_` prefix, so we
+/// select the matching scheme from the token itself — the agent just supplies
+/// whatever `NETBOX_TOKEN` NetBox handed it, regardless of version.
+pub fn authHeader(arena: std.mem.Allocator, token: []const u8) ![]const u8 {
+    const scheme = if (std.mem.startsWith(u8, token, "nbt_")) "Bearer" else "Token";
+    return std.fmt.allocPrint(arena, "{s} {s}", .{ scheme, token });
+}
+
 /// The active branch schema id, or null when branch routing is disabled.
 /// When set, object requests carry the `X-NetBox-Branch` header so guarded
 /// changes are scoped to a NetBox Branching branch instead of main. The value
@@ -72,10 +82,7 @@ pub const Client = struct {
         const arena = self.ctx.arena;
 
         const url = try std.fmt.allocPrint(arena, "{s}/api/{s}/{s}/", .{ self.ctx.config.netbox_url, ep, id });
-        const auth = try std.fmt.allocPrint(arena, "Token {s}", .{token});
-
-        var resp: std.Io.Writer.Allocating = .init(self.ctx.gpa);
-        defer resp.deinit();
+        const auth = try authHeader(arena, token);
 
         var extra: std.ArrayList(std.http.Header) = .empty;
         try extra.append(arena, .{ .name = "Accept", .value = "application/json" });
@@ -83,19 +90,57 @@ pub const Client = struct {
             try extra.append(arena, .{ .name = "X-NetBox-Branch", .value = schema_id });
         }
 
-        const fr = try self.http.fetch(.{
-            .location = .{ .url = url },
-            .method = method,
-            .payload = payload,
+        // Establish the connection with a bounded timeout so an unreachable
+        // NetBox fails fast instead of hanging the CLI indefinitely. We drive
+        // the request/response explicitly (rather than `fetch`) only so the
+        // timed connection can be injected.
+        const uri = try std.Uri.parse(url);
+        const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedUriScheme;
+        var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+        const host = try uri.getHost(&host_buf);
+        const port: u16 = uri.port orelse if (protocol == .tls) 443 else 80;
+
+        const connection = try self.http.connectTcpOptions(.{
+            .host = host,
+            .port = port,
+            .protocol = protocol,
+            .timeout = timeoutFor(self.ctx.config),
+        });
+
+        var req = try self.http.request(method, uri, .{
+            .connection = connection,
+            .keep_alive = false,
+            .redirect_behavior = .unhandled,
             .headers = .{
                 .authorization = .{ .override = auth },
                 .content_type = if (payload != null) .{ .override = "application/json" } else .default,
             },
             .extra_headers = extra.items,
-            .response_writer = &resp.writer,
         });
+        defer req.deinit();
 
-        const code: u16 = @intFromEnum(fr.status);
+        if (payload) |body_bytes| {
+            req.transfer_encoding = .{ .content_length = body_bytes.len };
+            var body = try req.sendBodyUnflushed(&.{});
+            try body.writer.writeAll(body_bytes);
+            try body.end();
+            try req.connection.?.flush();
+        } else {
+            try req.sendBodiless();
+        }
+
+        var response = try req.receiveHead(&.{});
+
+        var resp: std.Io.Writer.Allocating = .init(self.ctx.gpa);
+        defer resp.deinit();
+        var transfer_buffer: [4096]u8 = undefined;
+        const reader = response.reader(&transfer_buffer);
+        _ = reader.streamRemaining(&resp.writer) catch |err| switch (err) {
+            error.ReadFailed => return response.bodyErr().?,
+            else => |e| return e,
+        };
+
+        const code: u16 = @intFromEnum(response.head.status);
         return .{
             .status = code,
             .body = try self.ctx.gpa.dupe(u8, resp.written()),
@@ -104,10 +149,29 @@ pub const Client = struct {
     }
 };
 
+/// Build the per-request connect timeout from config. `0` means no timeout.
+fn timeoutFor(config: Config) std.Io.Timeout {
+    if (config.http_timeout_ms == 0) return .none;
+    return .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(config.http_timeout_ms)),
+        .clock = .awake,
+    } };
+}
+
 test "endpoint mapping" {
     try std.testing.expectEqualStrings("dcim/devices", endpoint("device").?);
     try std.testing.expectEqualStrings("ipam/ip-addresses", endpoint("ip-address").?);
     try std.testing.expect(endpoint("nope") == null);
+}
+
+test "authHeader selects scheme by token version" {
+    const a = std.testing.allocator;
+    const v1 = try authHeader(a, "0123456789abcdef0123456789abcdef01234567");
+    defer a.free(v1);
+    try std.testing.expectEqualStrings("Token 0123456789abcdef0123456789abcdef01234567", v1);
+    const v2 = try authHeader(a, "nbt_abcdefghijkl.secretsecretsecret");
+    defer a.free(v2);
+    try std.testing.expectEqualStrings("Bearer nbt_abcdefghijkl.secretsecretsecret", v2);
 }
 
 test "activeBranch routing" {

@@ -12,6 +12,9 @@ pub const Config = struct {
     branching: bool = false,
     /// Active branch schema id when `branching` is enabled.
     branch: ?[]const u8 = null,
+    /// Per-request NetBox timeout in milliseconds (bounds the connect phase so a
+    /// down/unreachable NetBox fails fast instead of hanging). 0 disables it.
+    http_timeout_ms: u64 = 15000,
 
     /// Build config from the process environment. Returned slices borrow the
     /// environment map and remain valid for the lifetime of the process.
@@ -22,9 +25,15 @@ pub const Config = struct {
             .state_dir = env.get("NBX_GUARD_STATE_DIR") orelse ".nbx-guard",
             .branching = parseBool(env.get("NBX_GUARD_BRANCHING")),
             .branch = env.get("NBX_GUARD_BRANCH"),
+            .http_timeout_ms = parseU64(env.get("NBX_GUARD_HTTP_TIMEOUT_MS")) orelse 15000,
         };
     }
 };
+
+fn parseU64(v: ?[]const u8) ?u64 {
+    const s = v orelse return null;
+    return std.fmt.parseInt(u64, s, 10) catch null;
+}
 
 fn parseBool(v: ?[]const u8) bool {
     const s = v orelse return false;
@@ -50,4 +59,11 @@ test "parseBool" {
 test "stripTrailingSlash" {
     try std.testing.expectEqualStrings("http://x", stripTrailingSlash("http://x/"));
     try std.testing.expectEqualStrings("http://x", stripTrailingSlash("http://x"));
+}
+
+test "parseU64" {
+    try std.testing.expectEqual(@as(?u64, 15000), parseU64("15000"));
+    try std.testing.expectEqual(@as(?u64, 0), parseU64("0"));
+    try std.testing.expectEqual(@as(?u64, null), parseU64(null));
+    try std.testing.expectEqual(@as(?u64, null), parseU64("oops"));
 }

@@ -6,8 +6,9 @@
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `NETBOX_URL` | `http://localhost:8000` | NetBox 基础 URL，末尾的斜杠会被去掉。 |
-| `NETBOX_TOKEN` | _（未设置）_ | API token；`get` / `inspect` / `apply` / `restore` **必需**。 |
+| `NETBOX_TOKEN` | _（未设置）_ | API token；`get` / `inspect` / `plan` / `apply` / `restore` **必需**。 |
 | `NBX_GUARD_STATE_DIR` | `.nbx-guard` | 本地状态目录（plans、approvals、backups、审计日志）。 |
+| `NBX_GUARD_HTTP_TIMEOUT_MS` | `15000` | 单次 NetBox 请求的连接超时（毫秒），避免 NetBox 不可达时 CLI 永久挂起；`0` 关闭。 |
 | `NBX_GUARD_BRANCHING` | `0` | 将读写路由进某个 NetBox Branching 分支。 |
 | `NBX_GUARD_BRANCH` | _（未设置）_ | 生效分支的 schema id，作为 `X-NetBox-Branch` 头发送。 |
 
@@ -22,6 +23,7 @@
 export NETBOX_URL=https://netbox.example.com
 export NETBOX_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 export NBX_GUARD_STATE_DIR=.nbx-guard
+export NBX_GUARD_HTTP_TIMEOUT_MS=15000
 export NBX_GUARD_BRANCHING=0
 ```
 
@@ -34,8 +36,22 @@ export NBX_GUARD_BRANCHING=0
 
 ## token 的处理
 
-token 从环境读取，并作为 `Token <token>` 的 Authorization 头发送给 NetBox。它
-**绝不**写入本地状态目录，也绝不在命令输出中打印——`version` 只报告
+token 从环境读取，并作为 Authorization 头发送给 NetBox。nbx-guard 会按 token 形态
+自动选择鉴权方案，与 NetBox 自身的判定一致：
+
+- **v2 token（NetBox 4.5+，默认）**：凭据形如 `nbt_<key>.<secret>`，以
+  `Authorization: Bearer nbt_<key>.<secret>` 发送。
+- **v1 token（旧版 / 升级遗留）**：40 字符的明文值，以 `Authorization: Token <token>`
+  发送。
+
+判定规则很简单：`NETBOX_TOKEN` 以 `nbt_` 开头则用 `Bearer`，否则用 `Token`。因此你只需
+把 NetBox 签发给你的 token 原样填入 `NETBOX_TOKEN` 即可，无需关心版本。
+
+> NetBox 4.5 起新建 token 默认是 v2，且服务端必须配置 `API_TOKEN_PEPPERS` 才能创建/校验
+> v2 token（netbox-docker 通过 `API_TOKEN_PEPPER_1` 提供）——这是 NetBox 侧的部署要求，
+> 与 nbx-guard 无关。
+
+token **绝不**写入本地状态目录，也绝不在命令输出中打印——`version` 只报告
 `token_configured: true|false`。
 
 ## NetBox Branching

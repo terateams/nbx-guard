@@ -1,7 +1,9 @@
 # 一次性 NetBox 验收栈：postgres + redis + netbox。
 # 仅用于本地验收，跑完即由 acceptance/run.sh 通过 `down -v` 销毁，可重复执行。
-# NetBox 固定到 4.2（netbox-docker 3.2.1），使用经典 API Token 机制，
-# 与 nbx-guard 的 `Authorization: Token <token>` 兼容。
+# NetBox 固定到 4.5.1（netbox-docker 3.4.2，与生产环境一致）。NetBox 4.5 默认签发
+# v2 API Token（凭据形如 `nbt_<key>.<secret>`，以 `Bearer` 方案鉴权），需要配置
+# API_TOKEN_PEPPERS 才能创建/校验。run.sh 会在就绪后植入一个确定性的 v2 Token，
+# nbx-guard 依据 `nbt_` 前缀自动改用 Bearer 方案（同时仍兼容旧版 v1 `Token` 方案）。
 
 services:
   postgres:
@@ -30,7 +32,7 @@ services:
       start_period: 3s
 
   netbox:
-    image: docker.io/netboxcommunity/netbox:v4.2-3.2.1
+    image: docker.io/netboxcommunity/netbox:v4.5.1-3.4.2
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,13 +53,18 @@ services:
       REDIS_CACHE_DATABASE: "1"
       # NetBox 自身
       SECRET_KEY: "nbx-guard-acceptance-secret-key-please-do-not-reuse-0123456789"
+      # v2 Token 的 HMAC pepper（NetBox 4.5 创建/校验 v2 Token 必需，至少 50 字符）
+      API_TOKEN_PEPPER_1: "nbx-guard-acceptance-api-token-pepper-do-not-reuse-0123456789"
       ALLOWED_HOSTS: "*"
-      # 自动创建超级用户与确定性的经典 API Token（验收用，固定值）
+      # 自动创建超级用户（admin）。NetBox 4.5 的 v2 Token 模型里 key 字段为
+      # varchar(12)，而 netbox-docker 仍按旧式把 SUPERUSER_API_TOKEN 当作 key 写入，
+      # 因此这里必须用 ≤12 字符的占位值，仅为了让入口脚本顺利建出 admin（该 Token
+      # 不会被使用）；真正用于验收的确定性 v2 Token 由 run.sh 就绪后植入。
       SKIP_SUPERUSER: "false"
       SUPERUSER_NAME: admin
       SUPERUSER_EMAIL: admin@example.com
       SUPERUSER_PASSWORD: admin
-      SUPERUSER_API_TOKEN: "0123456789abcdef0123456789abcdef01234567"
+      SUPERUSER_API_TOKEN: "nbxseedtok01"
       # 验收无需后台任务，加快冷启动
       HOUSEKEEPING_INTERVAL: "0"
     ports:
