@@ -11,7 +11,7 @@ nbx-guard 位于 LLM/agent 与 NetBox 之间。agent 永远无法直接调用 Ne
 被强制执行。
 
 ```
-Agent / LLM ──> nbx-guard CLI (Zig) ──> NetBox REST API
+Agent / LLM ──> nbxg CLI (Zig) ──> NetBox REST API
                       │                  NetBox Branching
                       └─> 本地状态：plans / backups / approvals / audit
                                           ▲
@@ -37,10 +37,33 @@ Agent / LLM ──> nbx-guard CLI (Zig) ──> NetBox REST API
 需要 **Zig 0.16.0**。
 
 ```sh
-zig build           # 产出 ./zig-out/bin/nbx-guard
+zig build           # 产出 ./zig-out/bin/nbxg
 zig build test      # 运行单元测试
 zig build run -- version
 ```
+
+## 作为 Agent 技能安装
+
+把 `nbxg` 及其技能说明安装给你的 Agent，使其能驱动受控的 NetBox 变更流程：
+
+```sh
+bash scripts/installer.sh
+```
+
+安装脚本会：
+
+1. **自动判断系统类型**（linux / macos / windows，x86_64 / aarch64）。
+2. **询问安装目录**，默认 `~/.agents/skills`（可用环境变量 `NBXG_INSTALL_DIR` 覆盖）；
+   实际安装到 `<目录>/nbx-guard/`。
+3. **若已存在则询问是否移除重装**（非交互场景设 `NBXG_ASSUME_YES=1` 自动重装）。
+4. 安装 `nbxg` 二进制与 [`skills/nbx-guard/SKILL.md`](skills/nbx-guard/SKILL.md)，
+   尽力把 `nbxg` 链接进 `~/.local/bin`，最后执行 **`nbxg --help`** 验证。
+
+二进制获取顺序：发行包内同目录的 `nbxg` → 仓库 `zig-out/bin/nbxg` → 本地 `zig build`
+→ 通过 `gh` 从 GitHub Release 下载（私有仓库需已登录 `gh`，可用 `NBXG_VERSION=vX.Y.Z` 指定版本）。
+
+安装完成后，Agent 应阅读 `SKILL.md` 了解命令、字段策略、JSON 信封与 `plan→approve→apply→restore`
+工作流。该文档就是给 Agent 的操作手册。
 
 ## 配置
 
@@ -77,17 +100,17 @@ API 完成——这些审批者级别的生命周期操作刻意不由 agent 网
 ## 命令
 
 ```
-nbx-guard version                          打印版本与当前生效配置
-nbx-guard help                             显示帮助
-nbx-guard get <type> <id>                  读取资源（只读）
-nbx-guard inspect <type> <id>              读取资源并标注字段策略
-nbx-guard plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
-nbx-guard approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
-nbx-guard reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）
-nbx-guard apply --plan <id>                先备份，再应用一个已审批/低风险的 plan
-nbx-guard restore --backup <id>            从备份快照回滚资源
-nbx-guard audit [--plan <id>]              显示审计日志
-nbx-guard list <plans|approvals|backups>   列出本地状态
+nbxg version                          打印版本与当前生效配置
+nbxg help                             显示帮助
+nbxg get <type> <id>                  读取资源（只读）
+nbxg inspect <type> <id>              读取资源并标注字段策略
+nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
+nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
+nbxg reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）
+nbxg apply --plan <id>                先备份，再应用一个已审批/低风险的 plan
+nbxg restore --backup <id>            从备份快照回滚资源
+nbxg audit [--plan <id>]              显示审计日志
+nbxg list <plans|approvals|backups>   列出本地状态
 ```
 
 `--set` 的取值在可能时按 JSON 解析（数字、布尔、数组、对象），否则当作字符串——
@@ -100,23 +123,23 @@ nbx-guard list <plans|approvals|backups>   列出本地状态
 ```sh
 export NETBOX_URL=http://netbox.local NETBOX_TOKEN=xxxx
 
-nbx-guard plan device 1 --set description="edge router"
+nbxg plan device 1 --set description="edge router"
 # -> { plan_id, plan_hash, risk_level: "low", status: "planned", next_action: "apply" }
 
-nbx-guard apply --plan plan_...      # 快照、PATCH、写审计 + 备份
-nbx-guard restore --backup bkp_...   # 需要时回滚
+nbxg apply --plan plan_...      # 快照、PATCH、写审计 + 备份
+nbxg restore --backup bkp_...   # 需要时回滚
 ```
 
 ### 高风险变更（需要审批）
 
 ```sh
-nbx-guard plan device 1 --set status=active
+nbxg plan device 1 --set status=active
 # -> status: "pending_approval", next_action: "approve"
 
-nbx-guard apply --plan plan_...      # 被拒：error.kind = "not_approved"
+nbxg apply --plan plan_...      # 被拒：error.kind = "not_approved"
 
-nbx-guard approve --plan plan_... --note "approved by netops"
-nbx-guard apply --plan plan_...      # 现在被允许
+nbxg approve --plan plan_... --note "approved by netops"
+nbxg apply --plan plan_...      # 现在被允许
 ```
 
 ## 响应信封
@@ -130,7 +153,7 @@ nbx-guard apply --plan plan_...      # 现在被允许
     "kind": "not_approved",
     "message": "high-risk plan requires approval before apply",
     "risk_level": "high",
-    "next_action": "run `nbx-guard approve --plan <plan_id>` first"
+    "next_action": "run `nbxg approve --plan <plan_id>` first"
   }
 }
 ```

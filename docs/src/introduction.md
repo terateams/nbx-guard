@@ -11,7 +11,7 @@ nbx-guard 位于 LLM/agent 与 NetBox 之间。agent 永远无法直接调用 Ne
 审批规则也在这里被强制执行。
 
 ```text
-Agent / LLM ──> nbx-guard CLI (Zig) ──> NetBox REST API
+Agent / LLM ──> nbxg CLI (Zig) ──> NetBox REST API
                       │                  NetBox Branching
                       └─> 本地状态：plans / backups / approvals / audit
                                          ▲

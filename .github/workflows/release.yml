@@ -56,14 +56,16 @@ jobs:
         run: |
           version="${{ inputs.tag || github.ref_name }}"
           target="${{ matrix.target }}"
-          name="nbx-guard-${version}-${target}"
+          name="nbxg-${version}-${target}"
           mkdir -p "pkg/${name}" out
           if [[ "$target" == *windows* ]]; then
-            cp "zig-out/bin/nbx-guard.exe" "pkg/${name}/"
+            cp "zig-out/bin/nbxg.exe" "pkg/${name}/"
           else
-            cp "zig-out/bin/nbx-guard" "pkg/${name}/"
+            cp "zig-out/bin/nbxg" "pkg/${name}/"
           fi
           cp README.md "pkg/${name}/"
+          cp scripts/installer.sh "pkg/${name}/"
+          cp skills/nbx-guard/SKILL.md "pkg/${name}/"
           if [[ "$target" == *windows* ]]; then
             (cd pkg && zip -r "../out/${name}.zip" "${name}")
           else
@@ -74,7 +76,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nbx-guard-${{ matrix.target }}
+          name: nbxg-${{ matrix.target }}
           path: out/*
           if-no-files-found: error
 

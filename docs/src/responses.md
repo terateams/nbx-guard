@@ -32,7 +32,7 @@
     "kind": "not_approved",
     "message": "high-risk plan requires approval before apply",
     "risk_level": "high",
-    "next_action": "run `nbx-guard approve --plan <plan_id>` first"
+    "next_action": "run `nbxg approve --plan <plan_id>` first"
   }
 }
 ```

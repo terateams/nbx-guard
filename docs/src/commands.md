@@ -4,17 +4,17 @@
 读写 NetBox 的命令都需要 `NETBOX_TOKEN`。
 
 ```text
-nbx-guard version                          打印版本与当前生效配置
-nbx-guard help                             显示帮助
-nbx-guard get <type> <id>                  读取资源（只读）
-nbx-guard inspect <type> <id>              读取资源并标注字段策略
-nbx-guard plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
-nbx-guard approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
-nbx-guard reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）
-nbx-guard apply --plan <id>                先备份，再应用一个已审批/低风险的 plan
-nbx-guard restore --backup <id>            从备份快照回滚资源
-nbx-guard audit [--plan <id>]              显示审计日志
-nbx-guard list <plans|approvals|backups>   列出本地状态
+nbxg version                          打印版本与当前生效配置
+nbxg help                             显示帮助
+nbxg get <type> <id>                  读取资源（只读）
+nbxg inspect <type> <id>              读取资源并标注字段策略
+nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
+nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
+nbxg reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）
+nbxg apply --plan <id>                先备份，再应用一个已审批/低风险的 plan
+nbxg restore --backup <id>            从备份快照回滚资源
+nbxg audit [--plan <id>]              显示审计日志
+nbxg list <plans|approvals|backups>   列出本地状态
 ```
 
 ## `version`
@@ -54,10 +54,10 @@ nbx-guard list <plans|approvals|backups>   列出本地状态
 取值在可能时按 JSON 解析，否则当作字符串：
 
 ```sh
-nbx-guard plan device 1 --set description="edge router"   # 字符串
-nbx-guard plan device 1 --set status=active               # 字符串 "active"
-nbx-guard plan device 1 --set tags='["core"]'             # JSON 数组
-nbx-guard plan vlan 10 --set custom_fields='{"x":1}'      # JSON 对象
+nbxg plan device 1 --set description="edge router"   # 字符串
+nbxg plan device 1 --set status=active               # 字符串 "active"
+nbxg plan device 1 --set tags='["core"]'             # JSON 数组
+nbxg plan vlan 10 --set custom_fields='{"x":1}'      # JSON 对象
 ```
 
 `--set k=v`、`--set=k=v`，以及裸写的 `k=v` 都被接受。

@@ -12,7 +12,7 @@ bash acceptance/run.sh
 
 脚本会：
 
-1. `zig build` 构建 `nbx-guard`；
+1. `zig build` 构建 `nbxg`；
 2. 用 `docker compose` 拉起一次性 NetBox 栈（postgres + redis + netbox）；
 3. 等待 NetBox API 就绪；
 4. 创建一个 `ip-address` 作为测试数据；

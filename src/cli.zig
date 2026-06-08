@@ -57,7 +57,7 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
     try ctx.fail(cmd, .{
         .kind = .invalid_args,
         .message = "unknown command",
-        .next_action = "run `nbx-guard help` to list supported commands",
+        .next_action = "run `nbxg help` to list supported commands",
     });
     return exit_client;
 }
@@ -68,7 +68,7 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
 
 fn cmdVersion(ctx: *Context) !void {
     const Info = struct {
-        name: []const u8 = "nbx-guard",
+        name: []const u8 = "nbxg",
         version: []const u8 = version,
         description: []const u8 = "Agent-only NetBox safe-change gateway (Zig)",
         netbox_url: []const u8,
@@ -89,9 +89,9 @@ fn cmdVersion(ctx: *Context) !void {
 
 fn printHelp(ctx: *Context) !void {
     const Help = struct {
-        name: []const u8 = "nbx-guard",
+        name: []const u8 = "nbxg",
         version: []const u8 = version,
-        usage: []const u8 = "nbx-guard <command> [options]",
+        usage: []const u8 = "nbxg <command> [options]",
         commands: []const []const u8 = &.{
             "version                          Print version and active configuration",
             "help                             Show this help",
@@ -112,6 +112,7 @@ fn printHelp(ctx: *Context) !void {
             "NETBOX_URL            NetBox base URL (default http://localhost:8000)",
             "NETBOX_TOKEN          NetBox API token (required for plan/get/inspect/apply/restore)",
             "NBX_GUARD_STATE_DIR   Local state directory (default .nbx-guard)",
+            "NBX_GUARD_HTTP_TIMEOUT_MS  NetBox connect timeout in ms (default 15000, 0=off)",
             "NBX_GUARD_BRANCHING   Use NetBox Branching (1/true)",
         },
         principle: []const u8 = "Agent proposes intent; the CLI decides what is allowed.",
@@ -128,7 +129,7 @@ fn cmdGet(ctx: *Context, rest: []const [:0]const u8, comptime command: []const u
         try ctx.fail(command, .{
             .kind = .invalid_args,
             .message = "expected <type> <id>",
-            .next_action = "example: nbx-guard " ++ command ++ " device 1",
+            .next_action = "example: nbxg " ++ command ++ " device 1",
         });
         return exit_client;
     }
@@ -175,7 +176,7 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
         try ctx.fail("plan", .{
             .kind = .invalid_args,
             .message = "expected <type> <id> --set field=value ...",
-            .next_action = "example: nbx-guard plan device 1 --set description=\"edge router\"",
+            .next_action = "example: nbxg plan device 1 --set description=\"edge router\"",
         });
         return exit_client;
     }
@@ -253,9 +254,9 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
     });
 
     const next_action = if (p.requires_approval)
-        "high-risk: run `nbx-guard approve --plan <plan_id>`, then `apply`"
+        "high-risk: run `nbxg approve --plan <plan_id>`, then `apply`"
     else
-        "low-risk: run `nbx-guard apply --plan <plan_id>`";
+        "low-risk: run `nbxg apply --plan <plan_id>`";
 
     try ctx.ok("plan", .{
         .plan = p,
@@ -325,7 +326,7 @@ fn cmdApprove(ctx: *Context, rest: []const [:0]const u8) !u8 {
     try ctx.ok("approve", .{
         .approval = a,
         .plan_status = p.status,
-        .next_action = "run `nbx-guard apply --plan <plan_id>`",
+        .next_action = "run `nbxg apply --plan <plan_id>`",
     });
     return exit_ok;
 }
@@ -426,7 +427,7 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
             .kind = .not_approved,
             .message = "high-risk plan requires approval before apply",
             .risk_level = p.risk_level,
-            .next_action = "run `nbx-guard approve --plan " ++ "" ++ "<plan_id>` first",
+            .next_action = "run `nbxg approve --plan " ++ "" ++ "<plan_id>` first",
         });
         return exit_client;
     }
@@ -572,7 +573,7 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
         .status = p.status,
         .diff = .{ .before = prior, .after = p.changes },
         .resource = applied,
-        .next_action = "verify in NetBox; to revert run `nbx-guard restore --backup <backup_id>`",
+        .next_action = "verify in NetBox; to revert run `nbxg restore --backup <backup_id>`",
     });
     return exit_ok;
 }
@@ -594,7 +595,7 @@ fn cmdRestore(ctx: *Context, rest: []const [:0]const u8) !u8 {
         try ctx.fail("restore", .{
             .kind = .backup_not_found,
             .message = "no such backup",
-            .next_action = "run `nbx-guard list backups`",
+            .next_action = "run `nbxg list backups`",
         });
         return exit_client;
     };
@@ -669,7 +670,7 @@ fn cmdList(ctx: *Context, rest: []const [:0]const u8) !u8 {
         try ctx.fail("list", .{
             .kind = .invalid_args,
             .message = "expected one of: plans | approvals | backups",
-            .next_action = "example: nbx-guard list plans",
+            .next_action = "example: nbxg list plans",
         });
         return exit_client;
     }
@@ -678,7 +679,7 @@ fn cmdList(ctx: *Context, rest: []const [:0]const u8) !u8 {
         try ctx.fail("list", .{
             .kind = .invalid_args,
             .message = "kind must be plans, approvals, or backups",
-            .next_action = "example: nbx-guard list plans",
+            .next_action = "example: nbxg list plans",
         });
         return exit_client;
     }
@@ -804,7 +805,7 @@ fn failMissingFlag(ctx: *Context, command: []const u8, flag: []const u8) !u8 {
     try ctx.fail(command, .{
         .kind = .invalid_args,
         .message = "missing required flag",
-        .next_action = "run `nbx-guard help`",
+        .next_action = "run `nbxg help`",
     });
     return exit_client;
 }
@@ -814,7 +815,7 @@ fn failPlanNotFound(ctx: *Context, command: []const u8, plan_id: []const u8) !u8
     try ctx.fail(command, .{
         .kind = .plan_not_found,
         .message = "no such plan",
-        .next_action = "run `nbx-guard list plans`",
+        .next_action = "run `nbxg list plans`",
     });
     return exit_client;
 }

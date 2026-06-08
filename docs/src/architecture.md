@@ -56,7 +56,7 @@ nbx-guard 是一个小巧、分层的 Zig 程序。agent 只能触达**命令层
 
 ## 构建与 CI
 
-`zig build` 产出 `zig-out/bin/nbx-guard`；`zig build test` 运行聚合在 `root.zig` 里的
+`zig build` 产出 `zig-out/bin/nbxg`；`zig build test` 运行聚合在 `root.zig` 里的
 单元测试。仓库附带三条 GitHub Actions 工作流：
 
 - **CI**——在每次 push/PR 时于 Linux 和 macOS 上构建、测试，并检查 `zig fmt`。

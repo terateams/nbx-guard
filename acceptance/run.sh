@@ -31,7 +31,7 @@ TOKEN_SECRET="0123456789abcdef0123456789abcdef01234567"
 TOKEN="nbt_${TOKEN_KEY}.${TOKEN_SECRET}"
 NB_AUTH="Authorization: Bearer ${TOKEN}"
 BASE="http://127.0.0.1:${PORT}"
-GUARD="$REPO_ROOT/zig-out/bin/nbx-guard"
+GUARD="$REPO_ROOT/zig-out/bin/nbxg"
 STATE_DIR="$SCRIPT_DIR/.state"
 READY_TIMEOUT="${NBX_READY_TIMEOUT:-480}"   # 等待 NetBox 就绪的秒数上限
 

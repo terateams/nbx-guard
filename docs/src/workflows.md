@@ -12,12 +12,12 @@ export NETBOX_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 只触及允许字段（`description`、`comments`、`tags`、`custom_fields`）的变更无需审批。
 
 ```sh
-nbx-guard plan device 1 --set description="edge router"
+nbxg plan device 1 --set description="edge router"
 # -> { plan_id, plan_hash, risk_level: "low", status: "planned",
-#      next_action: "low-risk: run `nbx-guard apply --plan <plan_id>`" }
+#      next_action: "low-risk: run `nbxg apply --plan <plan_id>`" }
 
-nbx-guard apply --plan plan_...      # 快照一份备份，PATCH，写审计
-nbx-guard restore --backup bkp_...   # 需要时回滚
+nbxg apply --plan plan_...      # 快照一份备份，PATCH，写审计
+nbxg restore --backup bkp_...   # 需要时回滚
 ```
 
 ## 高风险变更（需要审批）
@@ -26,14 +26,14 @@ nbx-guard restore --backup bkp_...   # 需要时回滚
 先经过审批。
 
 ```sh
-nbx-guard plan device 1 --set status=active
+nbxg plan device 1 --set status=active
 # -> status: "pending_approval", next_action: "...approve... then apply"
 
-nbx-guard apply --plan plan_...
+nbxg apply --plan plan_...
 # 被拒：error.kind = "not_approved"
 
-nbx-guard approve --plan plan_... --note "approved by netops"
-nbx-guard apply --plan plan_...      # 现在被允许
+nbxg approve --plan plan_... --note "approved by netops"
+nbxg apply --plan plan_...      # 现在被允许
 ```
 
 ## 驳回 plan（reject）
@@ -41,8 +41,8 @@ nbx-guard apply --plan plan_...      # 现在被允许
 已创建但你不想执行的 plan，可以显式驳回；之后再 `apply` 会被拒绝：
 
 ```sh
-nbx-guard reject --plan plan_... --note "暂不执行"
-nbx-guard apply  --plan plan_...
+nbxg reject --plan plan_... --note "暂不执行"
+nbxg apply  --plan plan_...
 # 被拒：error.kind = "plan_state_error"
 ```
 
@@ -51,7 +51,7 @@ nbx-guard apply  --plan plan_...
 改动策略之外字段的变更，会在 plan 阶段就被拒绝——不存储任何东西：
 
 ```sh
-nbx-guard plan device 1 --set name="core-1"
+nbxg plan device 1 --set name="core-1"
 # -> error.kind = "policy_denied"（name 不是可写字段）
 ```
 
@@ -60,18 +60,18 @@ nbx-guard plan device 1 --set name="core-1"
 agent 可以把资源连同策略一起查看，从而决定能安全提议什么：
 
 ```sh
-nbx-guard inspect device 1
+nbxg inspect device 1
 # data.resource = 实时资源；data.policy = 允许/高风险字段
 ```
 
 ## 审计与列举
 
 ```sh
-nbx-guard audit                 # 完整审计轨迹
-nbx-guard audit --plan plan_... # 只看某个 plan 的事件
-nbx-guard list plans            # 已存储的 plans
-nbx-guard list approvals        # 已存储的 approvals
-nbx-guard list backups          # 已存储的 backups
+nbxg audit                 # 完整审计轨迹
+nbxg audit --plan plan_... # 只看某个 plan 的事件
+nbxg list plans            # 已存储的 plans
+nbxg list approvals        # 已存储的 approvals
+nbxg list backups          # 已存储的 backups
 ```
 
 ## 推荐的 agent 循环
