@@ -159,6 +159,39 @@ fn cmdVersion(ctx: *Context) !void {
     });
 }
 
+/// One environment variable, described for a human: what value it takes and,
+/// in plain words, what it does.
+const EnvVar = struct {
+    name: []const u8,
+    default: []const u8,
+    example: []const u8,
+    purpose: []const u8,
+};
+
+/// The `env` section of `nbxg help`, grouped so the reader sees at a glance that
+/// only two variables are actually required and the rest are optional knobs.
+const EnvHelp = struct {
+    note: []const u8 = "Most setups need only NETBOX_URL + NETBOX_TOKEN. Everything below that is optional.",
+    required: []const EnvVar = &.{
+        .{ .name = "NETBOX_URL", .default = "http://localhost:8000", .example = "https://netbox.example.com", .purpose = "Address of your NetBox instance." },
+        .{ .name = "NETBOX_TOKEN", .default = "(unset)", .example = "<your-netbox-api-token>", .purpose = "NetBox API token. Required — without it nothing can read or write. Paste it as-is (v1 and v2 'nbt_…' tokens both work)." },
+    },
+    optional: []const EnvVar = &.{
+        .{ .name = "NBX_GUARD_STATE_DIR", .default = ".nbx-guard", .example = "/var/lib/nbx-guard", .purpose = "Folder for this tool's own data: change plans, approvals, backups, audit log." },
+        .{ .name = "NBX_GUARD_HTTP_TIMEOUT_MS", .default = "15000", .example = "15000", .purpose = "Give up on a NetBox request after this many milliseconds so a command never hangs. 0 = wait forever." },
+        .{ .name = "NBX_GUARD_BRANCHING", .default = "0", .example = "1", .purpose = "Set to 1 to work inside a NetBox Branching branch instead of the live data." },
+        .{ .name = "NBX_GUARD_BRANCH", .default = "(unset)", .example = "abc12345", .purpose = "Which branch to use (its schema id). Needed when NBX_GUARD_BRANCHING=1." },
+    },
+    advanced_note: []const u8 = "Operator-only. These widen what the tool is allowed to touch (it denies every type and field by default). An agent must not set them — set them once, more readably, in ~/.nbx-guard/config.json using the config.json key shown for each.",
+    advanced: []const EnvVar = &.{
+        .{ .name = "NBX_GUARD_CONFIG", .default = "~/.nbx-guard/config.json", .example = "/etc/nbx-guard/config.json", .purpose = "Read the operator config file from a custom path instead of the default location." },
+        .{ .name = "NBX_GUARD_EXTRA_RESOURCES", .default = "(unset)", .example = "site=dcim/sites,tenant=tenancy/tenants", .purpose = "Allow more NetBox resource types. Format: type=app/endpoint, comma-separated. config.json key: extra_resources." },
+        .{ .name = "NBX_GUARD_ALLOWED_FIELDS", .default = "(unset)", .example = "serial,asset_tag", .purpose = "Allow more fields to be written without approval (low risk). config.json key: allowed_fields." },
+        .{ .name = "NBX_GUARD_HIGH_RISK_FIELDS", .default = "(unset)", .example = "tenant", .purpose = "Allow more fields to be written, but require an approval first. config.json key: high_risk_fields." },
+        .{ .name = "NBX_GUARD_READ_SENSITIVE_FIELDS", .default = "(unset)", .example = "comments", .purpose = "Treat more fields as sensitive: hidden on read unless you run approve-read. config.json key: read_sensitive_fields." },
+    },
+};
+
 fn printHelp(ctx: *Context) !void {
     const ef = try policy.effectiveFields(ctx.arena, ctx.env);
     var types: std.ArrayList([]const u8) = .empty;
@@ -202,18 +235,7 @@ fn printHelp(ctx: *Context) !void {
         allowed_fields: []const []const u8,
         high_risk_fields: []const []const u8,
         read_sensitive_fields: []const []const u8,
-        env: []const []const u8 = &.{
-            "NETBOX_URL            NetBox base URL (default http://localhost:8000)",
-            "NETBOX_TOKEN          NetBox API token (required for plan/get/inspect/apply/restore)",
-            "NBX_GUARD_STATE_DIR   Local state directory (default .nbx-guard)",
-            "NBX_GUARD_HTTP_TIMEOUT_MS  NetBox connect timeout in ms (default 15000, 0=off)",
-            "NBX_GUARD_BRANCHING   Use NetBox Branching (1/true)",
-            "NBX_GUARD_BRANCH      Active branch schema id when branching is enabled",
-            "NBX_GUARD_EXTRA_RESOURCES  Operator-added types, e.g. site=dcim/sites,tenant=tenancy/tenants",
-            "NBX_GUARD_ALLOWED_FIELDS   Extra low-risk writable fields (comma/space separated)",
-            "NBX_GUARD_HIGH_RISK_FIELDS Extra approval-gated writable fields (comma/space separated)",
-            "NBX_GUARD_READ_SENSITIVE_FIELDS  Extra read-sensitive fields gated behind approve-read (comma/space separated)",
-        },
+        env: EnvHelp = .{},
         principle: []const u8 = "Agent proposes intent; the CLI decides what is allowed.",
     };
     try ctx.ok("help", Help{
