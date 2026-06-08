@@ -1,7 +1,8 @@
 # 配置
 
-所有配置都从**进程环境变量**读取（参见仓库中的 `.env.example`）。没有 token
-就不会向 NetBox 写入任何东西。
+所有**密钥与运行参数**都从进程环境变量读取（参见仓库中的 `.env.example`）。没有 token
+就不会向 NetBox 写入任何东西。**治理扩展**（新增类型/字段）既可用环境变量，也可用一个
+可选的 JSON 配置文件 `~/.nbx-guard/config.json`（见下文「算子配置文件」）。
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
@@ -11,6 +12,10 @@
 | `NBX_GUARD_HTTP_TIMEOUT_MS` | `15000` | 单次 NetBox 请求的连接超时（毫秒），避免 NetBox 不可达时 CLI 永久挂起；`0` 关闭。 |
 | `NBX_GUARD_BRANCHING` | `0` | 将读写路由进某个 NetBox Branching 分支。 |
 | `NBX_GUARD_BRANCH` | _（未设置）_ | 生效分支的 schema id，作为 `X-NetBox-Branch` 头发送。 |
+| `NBX_GUARD_EXTRA_RESOURCES` | _（未设置）_ | 算子新增受治理类型（`类型=端点` 列表）。详见[策略](./policy.md#算子扩展默认拒绝之外的显式放行)。 |
+| `NBX_GUARD_ALLOWED_FIELDS` | _（未设置）_ | 算子追加的低风险可写字段（逗号/空格分隔）。 |
+| `NBX_GUARD_HIGH_RISK_FIELDS` | _（未设置）_ | 算子追加的高风险字段（写入需审批）。 |
+| `NBX_GUARD_CONFIG` | _（未设置）_ | 算子配置文件路径覆盖；默认 `~/.nbx-guard/config.json`。 |
 
 ## 布尔值解析
 
@@ -26,6 +31,28 @@ export NBX_GUARD_STATE_DIR=.nbx-guard
 export NBX_GUARD_HTTP_TIMEOUT_MS=15000
 export NBX_GUARD_BRANCHING=0
 ```
+
+## 算子配置文件（治理扩展）
+
+除环境变量外，**人工算子**还可以把治理扩展写进一个 JSON 文件，免去导出三个环境变量。
+默认路径 `~/.nbx-guard/config.json`（用 `NBX_GUARD_CONFIG` 可改路径）：
+
+```json
+{
+  "extra_resources":  { "site": "dcim/sites", "tenant": "tenancy/tenants" },
+  "allowed_fields":   ["serial", "asset_tag"],
+  "high_risk_fields": ["tenant"]
+}
+```
+
+- 三个键分别等价于 `NBX_GUARD_EXTRA_RESOURCES` / `NBX_GUARD_ALLOWED_FIELDS` /
+  `NBX_GUARD_HIGH_RISK_FIELDS`，行为完全一致；文件与环境变量**取并集**（键冲突时环境变量优先）。
+- **只放治理扩展，密钥仍只走环境变量**：不要把 `NETBOX_URL` / `NETBOX_TOKEN` 写进此文件。
+- 文件不存在则静默跳过（向后兼容）；JSON 非法或 `NBX_GUARD_CONFIG` 指向的文件缺失 →
+  以 `config_error`（退出码 3）失败。
+- `~/.nbx-guard/`（算子配置）与状态目录 `.nbx-guard/`（plans/backups/审计）是两个不同目录。
+
+完整语义与 fail-safe 约束见[策略 · 算子扩展](./policy.md#算子扩展默认拒绝之外的显式放行)。
 
 ## 状态存放在哪里
 

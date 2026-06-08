@@ -85,6 +85,15 @@ bash scripts/installer.sh
 | `NBX_GUARD_EXTRA_RESOURCES` | _（未设置）_ | **算子**扩展受治理类型（`类型=端点` 列表，如 `site=dcim/sites`） |
 | `NBX_GUARD_ALLOWED_FIELDS` | _（未设置）_ | **算子**追加的低风险字段（逗号/空格分隔） |
 | `NBX_GUARD_HIGH_RISK_FIELDS` | _（未设置）_ | **算子**追加的高风险字段（需审批） |
+| `NBX_GUARD_CONFIG` | _（未设置）_ | **算子**配置文件路径覆盖；默认 `~/.nbx-guard/config.json` |
+
+> **算子配置文件（更友好）**：不想导出上面三个治理扩展变量，可改用一个 JSON 文件
+> `~/.nbx-guard/config.json`（路径可用 `NBX_GUARD_CONFIG` 覆盖），行为与环境变量一致、且与
+> 环境变量取并集；**密钥仍只走环境变量，不要写进此文件**。
+>
+> ```json
+> { "extra_resources": { "site": "dcim/sites" }, "allowed_fields": ["serial"], "high_risk_fields": ["tenant"] }
+> ```
 
 `NETBOX_TOKEN` 同时支持 NetBox v1 与 v2 token：以 `nbt_` 开头的 v2 token（NetBox 4.5+
 默认）自动以 `Bearer` 方案鉴权，其余按 v1 `Token` 方案发送——把 NetBox 给你的 token
@@ -106,9 +115,9 @@ API 完成——这些审批者级别的生命周期操作刻意不由 agent 网
 支持的资源类型：`device`、`interface`、`ip-address`、`prefix`、`vlan`、`contact`。
 
 > **算子可扩展**：以上是内置的安全下限。人工运维方（非 agent）可用 `NBX_GUARD_EXTRA_RESOURCES`
-> 增加受治理类型、用 `NBX_GUARD_ALLOWED_FIELDS` / `NBX_GUARD_HIGH_RISK_FIELDS` 增加字段，
-> 而默认拒绝与全部工作流控制（plan/审批/备份/漂移/审计/还原）保持不变，agent 自身无法扩展。
-> 详见[策略文档](docs/src/policy.md)。
+> 增加受治理类型、用 `NBX_GUARD_ALLOWED_FIELDS` / `NBX_GUARD_HIGH_RISK_FIELDS` 增加字段
+> （或等价地写进 `~/.nbx-guard/config.json`），而默认拒绝与全部工作流控制（plan/审批/备份/
+> 漂移/审计/还原）保持不变，agent 自身无法扩展。详见[策略文档](docs/src/policy.md)。
 
 ## 命令
 
