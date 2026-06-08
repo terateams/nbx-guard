@@ -78,6 +78,8 @@ nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并对每个字段标注策略类别
 nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（默认 brief 只读）
 nbxg search <type> -q <text> [选项]   按 NetBox q 模糊搜索某类型的对象（发现 id）
+nbxg export <type> [选项]             只读导出/快照匹配资源（含来源元数据，供评审/审计/对比）
+nbxg snapshot <type> <id> [--out p]   只读快照单个资源（含来源元数据）
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：列出可写字段 / 输入输出 schema，并实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险 + 漂移基线）
@@ -114,6 +116,27 @@ nbxg get contact 3                           # 用上一步发现的 id 读取
 **Agent 用法**：需要对「某个名字/描述」的对象动手时，先 `search`/`list-resources` 拿到 `id`，
 再 `describe <type>` 确认可写字段，最后 `plan → apply`。除非确有需要，避免 `--all-fields`
 （返回面更大），优先用默认 `brief`。
+
+---
+
+## 只读导出与快照（评审 / 审计 / 对比）
+
+变更前评审、审计证据、离线审批与变更后对比时，用 `export`/`snapshot` 把当前状态固化为带**来源
+元数据**的工件（只读、不触发审批、需要 token）：
+
+- `nbxg export <type> [--filter k=v ...] [-q text] [--fields basic|full] [--format json|jsonl] [--out path] [--limit n]`
+  自动翻页抓全所有匹配对象。`--fields basic`（默认）走 NetBox `brief` 最小读取面；`full` 返回完整属性。
+- `nbxg snapshot <type> <id> [--out path]`：抓取单个对象的当前状态。
+
+工件/响应里的 `metadata` 含 `resource_type`、`filters`、`field_profile`、`format`、`count`、
+`generated_at`、`netbox_url_hash`（NetBox URL 指纹）、`netbox_instance`、`nbxg_version`（启用分支时
+还含 `branch`）。token 绝不写入工件。给 `--out` 写文件（自动建父目录），否则把内容嵌入响应 `data`。
+
+```text
+nbxg export device --filter site=tokyo --fields basic --format json
+nbxg export prefix --filter status=active --format jsonl --out snapshots/prefixes.jsonl
+nbxg snapshot device 123 --out snapshots/device-123.json
+```
 
 ---
 
