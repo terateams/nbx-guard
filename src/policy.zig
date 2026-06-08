@@ -14,9 +14,89 @@ pub const allowed_fields = [_][]const u8{ "description", "comments", "tags", "cu
 /// High-risk fields: writable only through an approved plan.
 pub const high_risk_fields = [_][]const u8{ "status", "role", "site", "rack", "prefix", "address", "groups" };
 
+/// Read-sensitive fields: attributes whose *values* are sensitive to expose
+/// wholesale into an agent transcript, even when they may be low-risk to *write*
+/// (e.g. contact `phone`/`email`, free-form `comments`, organization-specific
+/// `custom_fields`, ownership via `tenant`). A full-object ("all") read that
+/// would surface any of these requires an explicit read approval; the default
+/// "basic" read redacts them. This is the read counterpart of the write
+/// allow/high-risk lists and is classified independently from them.
+pub const read_sensitive_fields = [_][]const u8{ "phone", "email", "comments", "custom_fields", "tenant" };
+
+/// Marker substituted for a sensitive field's value in a redacted (basic) read.
+pub const read_redaction = "[redacted: read approval required]";
+
+pub const ReadClass = enum { basic, sensitive };
+
 /// Only `update` is permitted. `create`/`delete`/`bulk_delete` are refused.
 pub fn actionAllowed(action: []const u8) bool {
     return std.mem.eql(u8, action, "update");
+}
+
+/// Classify a field for *read exposure* (built-in lists only). Sensitive fields
+/// are gated behind a read approval; everything else is basic (low-risk read).
+pub fn classifyReadField(name: []const u8) ReadClass {
+    for (read_sensitive_fields) |f| if (std.mem.eql(u8, name, f)) return .sensitive;
+    return .basic;
+}
+
+/// Like `classifyReadField`, but the operator may widen the read-sensitive set
+/// via `NBX_GUARD_READ_SENSITIVE_FIELDS` (comma/space separated). Built-in
+/// sensitivity always wins (fail safe: a field can only become *more* guarded).
+pub fn classifyReadFieldEnv(env: *const EnvMap, name: []const u8) ReadClass {
+    if (classifyReadField(name) == .sensitive) return .sensitive;
+    if (envListHas(env, "NBX_GUARD_READ_SENSITIVE_FIELDS", name)) return .sensitive;
+    return .basic;
+}
+
+/// Effective read-sensitive field list: built-ins plus operator env additions.
+/// Mirrors `classifyReadFieldEnv` so self-description matches enforcement.
+pub fn effectiveReadSensitiveFields(arena: std.mem.Allocator, env: *const EnvMap) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    try list.appendSlice(arena, &read_sensitive_fields);
+    if (env.get("NBX_GUARD_READ_SENSITIVE_FIELDS")) |spec| {
+        var it = std.mem.tokenizeAny(u8, spec, ", \t");
+        while (it.next()) |tok| {
+            if (classifyReadField(tok) == .sensitive) continue;
+            if (!listHas(list.items, tok)) try list.append(arena, tok);
+        }
+    }
+    return list.toOwnedSlice(arena);
+}
+
+/// Names of read-sensitive fields actually present on a NetBox object. A
+/// non-object value (e.g. a brief/identifier) has none.
+pub fn sensitiveFieldsPresent(arena: std.mem.Allocator, env: *const EnvMap, resource: std.json.Value) ![]const []const u8 {
+    const obj = switch (resource) {
+        .object => |o| o,
+        else => return &.{},
+    };
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        if (classifyReadFieldEnv(env, entry.key_ptr.*) == .sensitive)
+            try out.append(arena, entry.key_ptr.*);
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// Return a shallow copy of `resource` with every read-sensitive field's value
+/// replaced by `read_redaction`. Non-object values pass through unchanged.
+pub fn redactSensitive(arena: std.mem.Allocator, env: *const EnvMap, resource: std.json.Value) !std.json.Value {
+    const obj = switch (resource) {
+        .object => |o| o,
+        else => return resource,
+    };
+    var out: std.json.ObjectMap = .empty;
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        if (classifyReadFieldEnv(env, entry.key_ptr.*) == .sensitive) {
+            try out.put(arena, entry.key_ptr.*, .{ .string = read_redaction });
+        } else {
+            try out.put(arena, entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
+    return .{ .object = out };
 }
 
 pub fn classifyField(name: []const u8) FieldClass {
@@ -230,4 +310,72 @@ test "effectiveFields surfaces env additions with built-in precedence" {
     try testing.expect(listHas(ef.high_risk, "tenant")); // env high surfaced
     try testing.expect(!listHas(ef.high_risk, "serial")); // env low not in high
     try testing.expect(!listHas(ef.allowed, "name")); // unlisted stays denied
+}
+
+test "read classification gates sensitive fields, basic otherwise" {
+    try testing.expectEqual(ReadClass.sensitive, classifyReadField("phone"));
+    try testing.expectEqual(ReadClass.sensitive, classifyReadField("email"));
+    try testing.expectEqual(ReadClass.sensitive, classifyReadField("custom_fields"));
+    try testing.expectEqual(ReadClass.sensitive, classifyReadField("comments"));
+    try testing.expectEqual(ReadClass.sensitive, classifyReadField("tenant"));
+    // identifying / non-sensitive fields are basic (low-risk read)
+    try testing.expectEqual(ReadClass.basic, classifyReadField("id"));
+    try testing.expectEqual(ReadClass.basic, classifyReadField("name"));
+    try testing.expectEqual(ReadClass.basic, classifyReadField("status"));
+}
+
+test "operator env widens read-sensitive set (fail-safe, more guarded only)" {
+    const a = testing.allocator;
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("NBX_GUARD_READ_SENSITIVE_FIELDS", "serial, asset_tag");
+
+    try testing.expectEqual(ReadClass.sensitive, classifyReadFieldEnv(&env, "serial"));
+    try testing.expectEqual(ReadClass.sensitive, classifyReadFieldEnv(&env, "phone")); // built-in still sensitive
+    try testing.expectEqual(ReadClass.basic, classifyReadFieldEnv(&env, "name")); // unlisted stays basic
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const eff = try effectiveReadSensitiveFields(arena.allocator(), &env);
+    try testing.expect(listHas(eff, "phone")); // built-in retained
+    try testing.expect(listHas(eff, "serial")); // env addition surfaced
+    try testing.expect(!listHas(eff, "name"));
+}
+
+test "redactSensitive masks sensitive values and reports presence" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+
+    const resource = try std.json.parseFromSliceLeaky(std.json.Value, ar,
+        \\{"id":7,"name":"alice","phone":"+1-555","email":"a@x.io","status":"active"}
+    , .{});
+
+    const present = try sensitiveFieldsPresent(ar, &env, resource);
+    try testing.expectEqual(@as(usize, 2), present.len); // phone + email
+
+    const redacted = try redactSensitive(ar, &env, resource);
+    const obj = redacted.object;
+    try testing.expectEqualStrings(read_redaction, obj.get("phone").?.string);
+    try testing.expectEqualStrings(read_redaction, obj.get("email").?.string);
+    // identifying / non-sensitive fields are preserved verbatim
+    try testing.expectEqualStrings("alice", obj.get("name").?.string);
+    try testing.expectEqual(@as(i64, 7), obj.get("id").?.integer);
+    try testing.expectEqualStrings("active", obj.get("status").?.string);
+}
+
+test "redactSensitive passes through non-object values" {
+    const a = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    const v = std.json.Value{ .string = "brief" };
+    const out = try redactSensitive(arena.allocator(), &env, v);
+    try testing.expectEqualStrings("brief", out.string);
+    const present = try sensitiveFieldsPresent(arena.allocator(), &env, v);
+    try testing.expectEqual(@as(usize, 0), present.len);
 }
