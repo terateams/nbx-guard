@@ -10,6 +10,8 @@ nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并标注字段策略
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：可写字段 / 输入输出 schema，实时对齐 NetBox
+nbxg export <type> [选项]             只读导出/快照匹配资源（含来源元数据）
+nbxg snapshot <type> <id> [--out p]   只读快照单个资源（含来源元数据）
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
 nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
 nbxg reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）
@@ -78,6 +80,43 @@ nbxg search device -q core --filter status=active
 
 > 读取（`get`/`inspect`/`list-resources`/`search`）不触发审批；写入仍必须 `plan`。
 > 先用 `search`/`list-resources` 发现 `id`，再对该 `id` 走 `plan → apply`。
+
+## `export <type> [选项]`
+
+**只读导出/快照**：把匹配某类型的对象批量抓取为带**来源元数据**的工件，用于变更前评审、
+审计证据、离线审批与变更后对比。只读，需要 token。会**自动翻页**抓全所有匹配对象（受 `--limit`
+或安全上限约束）。
+
+| 选项 | 含义 |
+|---|---|
+| `--filter key=value` | 透传任意 NetBox 过滤器，可重复（如 `--filter site=tokyo`） |
+| `-q` / `--query` / `--name <text>` | NetBox 通用 `q` 模糊检索 |
+| `--fields basic\|full` | 读取面分级：`basic`（默认，NetBox `brief` 最小读取面）或 `full`（完整属性）；`--all-fields` 等同 `full` |
+| `--format json\|jsonl` | `--out` 文件编码：`json`（默认，`{metadata, records}`）或 `jsonl`（首行 `{"_meta":…}`，其后每行一个对象） |
+| `--out <path>` | 写入文件（自动创建父目录）；省略时记录嵌入响应的 `data` |
+| `--limit <n>` | 最多导出多少条；省略时导出全部匹配 |
+| `--offset <n>` | 起始偏移 |
+
+响应/工件的 `metadata` 包含：`resource_type`、`filters`、`query`、`field_profile`、`format`、
+`count`、`generated_at`（秒）、`netbox_url_hash`（NetBox URL 的 SHA-256 前 16 位指纹）、
+`netbox_instance`（host[:port] 标签）、`nbxg_version`，以及启用分支时的 `branch`。token 绝不写入工件。
+
+```sh
+nbxg export device --filter site=tokyo --fields basic --format json
+nbxg export prefix --filter status=active --format jsonl --out snapshots/prefixes.jsonl
+nbxg export device --limit 10
+```
+
+## `snapshot <type> <id> [--out <path>]`
+
+**只读单对象快照**：抓取某个对象的当前状态，附带与 `export` 相同的来源元数据，用于变更前评审与
+变更后对比。只读，需要 token。给 `--out` 则写文件（`{metadata, resource}`，自动建父目录），否则
+把快照嵌入响应的 `data`。
+
+```sh
+nbxg snapshot device 123 --out snapshots/device-123.json
+nbxg snapshot ip-address 42
+```
 
 ## `describe [<type>] [--source options|openapi] [--refresh] [--offline]`
 
