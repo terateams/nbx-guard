@@ -14,7 +14,7 @@ const backup = @import("backup.zig");
 const audit = @import("audit.zig");
 const netbox = @import("netbox.zig");
 
-pub const version = "0.1.1";
+pub const version = "0.2.0";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
