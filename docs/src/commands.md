@@ -6,6 +6,7 @@
 ```text
 nbxg version                          打印版本与当前生效配置
 nbxg help                             显示帮助
+nbxg doctor [--skill <dir>]           自检：安装的二进制与 SKILL.md/源码是否一致（离线）
 nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并标注字段策略
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
@@ -28,6 +29,33 @@ nbxg list <plans|approvals|backups>   列出本地状态
 
 打印用法、命令列表、支持的资源类型、允许/高风险字段列表，以及可识别的环境变量。
 也可用 `--help` / `-h`。不带参数运行时打印帮助。
+
+## `doctor [--skill <dir>]`
+
+**一致性自检**（离线，不访问网络，无需 token）：比对当前**二进制自带**的版本、支持的资源类型、
+低/高风险策略字段与**安装的 `SKILL.md`**，并在仓库内运行时附带对比源码 `build.zig.zon` 的版本。
+用于发现「安装的二进制」与「文档/源码」之间的版本漂移（例如二进制还停在旧版本、文档已新增
+`contact` 资源类型）。
+
+`data` 下给出：
+
+- `status`：`consistent`（一致）/ `drift`（存在漂移）/ `skill_not_found`（未找到可比对的 `SKILL.md`）。
+- `consistent`：布尔总览。
+- `binary`：二进制自带的 `version` / `resource_types` / `low_risk_fields` / `high_risk_fields` 与调用路径 `path`。
+- `source`：源码 `build.zig.zon` 版本与是否匹配（仅在仓库内运行时存在）。
+- `skill_doc`：定位到的 `SKILL.md` 的 `path` / `source` / `sha256` / `size` 及其文档化的类型与字段。
+- `readme`：同目录 `README.md` 的校验和（若存在）。
+- `checks`：逐项比对结果（`resource_types` / `low_risk_fields` / `high_risk_fields`，含 `binary_only` / `doc_only` 差异）。
+- `issues`：人类可读的不一致清单；`next_action`：修复建议。
+
+默认按以下顺序查找 `SKILL.md`：`--skill <dir>` 指定项 → `NBX_GUARD_SKILL_DIR` →
+二进制所在目录（绝对路径直接调用时）→ `~/.agents/skills/nbx-guard/` → 当前仓库布局
+（`skills/nbx-guard/SKILL.md`）。一致时退出码为 `0`，发现漂移时为 `2`。
+
+```sh
+nbxg doctor
+nbxg doctor --skill ~/.agents/skills/nbx-guard
+```
 
 ## `get <type> <id>`
 

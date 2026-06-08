@@ -13,6 +13,7 @@ const approval = @import("approval.zig");
 const backup = @import("backup.zig");
 const audit = @import("audit.zig");
 const netbox = @import("netbox.zig");
+const doctor = @import("doctor.zig");
 
 pub const version = "0.4.0";
 
@@ -35,6 +36,8 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
     } else if (eq(cmd, "help") or eq(cmd, "--help") or eq(cmd, "-h")) {
         try printHelp(ctx);
         return exit_ok;
+    } else if (eq(cmd, "doctor")) {
+        return cmdDoctor(ctx, args[0], rest);
     } else if (eq(cmd, "get")) {
         return cmdGet(ctx, rest, "get");
     } else if (eq(cmd, "inspect")) {
@@ -102,6 +105,7 @@ fn printHelp(ctx: *Context) !void {
         commands: []const []const u8 = &.{
             "version                          Print version and active configuration",
             "help                             Show this help",
+            "doctor [--skill <dir>]           Check installed binary vs SKILL.md/source for drift (offline)",
             "get <type> <id>                  Read a NetBox resource (read-only)",
             "inspect <type> <id>              Read a resource annotated with field policy",
             "list-resources <type> [--limit N] [--offset N] [--all-fields]",
@@ -135,6 +139,247 @@ fn printHelp(ctx: *Context) !void {
         principle: []const u8 = "Agent proposes intent; the CLI decides what is allowed.",
     };
     try ctx.ok("help", Help{});
+}
+
+// ---------------------------------------------------------------------------
+// doctor (offline consistency check)
+// ---------------------------------------------------------------------------
+
+const DoctorSkill = struct {
+    found: bool,
+    source: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+    sha256: ?[]const u8 = null,
+    size: ?usize = null,
+    resource_types: ?[]const []const u8 = null,
+    low_risk_fields: ?[]const []const u8 = null,
+    high_risk_fields: ?[]const []const u8 = null,
+};
+
+const DoctorFile = struct {
+    found: bool,
+    path: ?[]const u8 = null,
+    sha256: ?[]const u8 = null,
+    size: ?usize = null,
+};
+
+const DoctorCheck = struct {
+    name: []const u8,
+    ok: bool,
+    detail: []const u8,
+    binary_only: []const []const u8 = &.{},
+    doc_only: []const []const u8 = &.{},
+};
+
+/// Best-effort read of a (possibly absolute) path relative to cwd. Any failure
+/// — missing file, bad parent, permission — is treated as "absent" so doctor can
+/// keep probing candidate locations without aborting.
+fn readFileOpt(ctx: *Context, path: []const u8) ?[]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(1 << 20)) catch null;
+}
+
+/// `nbxg doctor`: compare the installed binary's self-knowledge (version,
+/// governed resource types, policy fields) against the installed `SKILL.md` and,
+/// when run from a checkout, the repository `build.zig.zon` version. Fully
+/// offline; needs no NetBox token. Exits 0 when consistent, 2 on drift.
+fn cmdDoctor(ctx: *Context, argv0: []const u8, rest: []const [:0]const u8) !u8 {
+    var explicit: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (eq(a, "--skill") or eq(a, "--skill-dir")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                explicit = rest[i];
+            }
+        } else if (std.mem.startsWith(u8, a, "--skill=")) {
+            explicit = a["--skill=".len..];
+        } else if (std.mem.startsWith(u8, a, "--skill-dir=")) {
+            explicit = a["--skill-dir=".len..];
+        }
+    }
+
+    // Binary self-knowledge (all compile-time constants).
+    var rtypes: std.ArrayList([]const u8) = .empty;
+    for (schema.resources) |r| try rtypes.append(ctx.arena, r.key);
+    const bin_rtypes = rtypes.items;
+    const bin_low: []const []const u8 = &policy.allowed_fields;
+    const bin_high: []const []const u8 = &policy.high_risk_fields;
+
+    // Locate the installed SKILL.md by probing candidate locations in priority
+    // order: explicit flag, operator env, the binary's own directory (direct
+    // absolute-path invocation), the default install dir, then the repo layout.
+    const Candidate = struct { source: []const u8, path: []const u8 };
+    var cands: std.ArrayList(Candidate) = .empty;
+    if (explicit) |e| {
+        const p = if (std.mem.endsWith(u8, e, "SKILL.md"))
+            try ctx.arena.dupe(u8, e)
+        else
+            try std.fs.path.join(ctx.arena, &.{ e, "SKILL.md" });
+        try cands.append(ctx.arena, .{ .source = "flag", .path = p });
+    }
+    if (ctx.env.get("NBX_GUARD_SKILL_DIR")) |d|
+        try cands.append(ctx.arena, .{ .source = "env", .path = try std.fs.path.join(ctx.arena, &.{ d, "SKILL.md" }) });
+    if (std.fs.path.dirname(argv0)) |d| if (d.len > 0)
+        try cands.append(ctx.arena, .{ .source = "binary-dir", .path = try std.fs.path.join(ctx.arena, &.{ d, "SKILL.md" }) });
+    if (ctx.env.get("HOME")) |h|
+        try cands.append(ctx.arena, .{ .source = "home", .path = try std.fs.path.join(ctx.arena, &.{ h, ".agents/skills/nbx-guard/SKILL.md" }) });
+    try cands.append(ctx.arena, .{ .source = "cwd", .path = "skills/nbx-guard/SKILL.md" });
+    try cands.append(ctx.arena, .{ .source = "cwd", .path = "SKILL.md" });
+
+    var skill: DoctorSkill = .{ .found = false };
+    var readme: DoctorFile = .{ .found = false };
+    var checks: std.ArrayList(DoctorCheck) = .empty;
+    var issues: std.ArrayList([]const u8) = .empty;
+    var drift = false;
+
+    for (cands.items) |c| {
+        const text = readFileOpt(ctx, c.path) orelse continue;
+        skill = .{
+            .found = true,
+            .source = c.source,
+            .path = c.path,
+            .sha256 = try doctor.sha256Hex(ctx.arena, text),
+            .size = text.len,
+            .resource_types = try doctor.documentedTokens(ctx.arena, text, doctor.marker_resource_types),
+            .low_risk_fields = try doctor.documentedTokens(ctx.arena, text, doctor.marker_low_fields),
+            .high_risk_fields = try doctor.documentedTokens(ctx.arena, text, doctor.marker_high_fields),
+        };
+        // A README.md installed alongside the skill is checksummed (not parsed)
+        // so operators can detect README drift across installs.
+        if (std.fs.path.dirname(c.path)) |dir| {
+            const rp = try std.fs.path.join(ctx.arena, &.{ dir, "README.md" });
+            if (readFileOpt(ctx, rp)) |rtext|
+                readme = .{ .found = true, .path = rp, .sha256 = try doctor.sha256Hex(ctx.arena, rtext), .size = rtext.len };
+        }
+        break;
+    }
+
+    if (skill.found) {
+        try doctorCheck(ctx, &checks, &issues, &drift, "resource_types", "resource types", bin_rtypes, skill.resource_types);
+        try doctorCheck(ctx, &checks, &issues, &drift, "low_risk_fields", "low-risk policy fields", bin_low, skill.low_risk_fields);
+        try doctorCheck(ctx, &checks, &issues, &drift, "high_risk_fields", "high-risk policy fields", bin_high, skill.high_risk_fields);
+    }
+
+    // Repository/source version (only present when run from a checkout).
+    var source_version: ?[]const u8 = null;
+    var source_matches: ?bool = null;
+    if (readFileOpt(ctx, "build.zig.zon")) |zon| {
+        if (doctor.parseZonVersion(zon)) |sv| {
+            source_version = sv;
+            const matches = std.mem.eql(u8, sv, version);
+            source_matches = matches;
+            if (!matches) {
+                drift = true;
+                try issues.append(ctx.arena, try std.fmt.allocPrint(
+                    ctx.arena,
+                    "binary version {s} differs from repository source version {s}",
+                    .{ version, sv },
+                ));
+            }
+        }
+    }
+
+    const status: []const u8 = if (!skill.found)
+        "skill_not_found"
+    else if (drift)
+        "drift"
+    else
+        "consistent";
+
+    const next_action: []const u8 = if (!skill.found)
+        "install the skill (run scripts/installer.sh) or pass `nbxg doctor --skill <dir>` to point at SKILL.md"
+    else if (drift)
+        "reinstall so the binary and SKILL.md match: re-run scripts/installer.sh (rebuild with `zig build` first if needed)"
+    else
+        "installed binary and skill documentation agree";
+
+    if (!skill.found)
+        try issues.append(ctx.arena, "could not locate an installed SKILL.md to verify against");
+
+    try ctx.ok("doctor", .{
+        .status = status,
+        .consistent = skill.found and !drift,
+        .binary = .{
+            .name = "nbxg",
+            .version = version,
+            .path = argv0,
+            .resource_types = bin_rtypes,
+            .low_risk_fields = bin_low,
+            .high_risk_fields = bin_high,
+        },
+        .source = .{
+            .version = source_version,
+            .matches_binary = source_matches,
+        },
+        .skill_doc = skill,
+        .readme = readme,
+        .checks = checks.items,
+        .issues = issues.items,
+        .next_action = next_action,
+    });
+    return if (drift) exit_client else exit_ok;
+}
+
+/// Append one doc-vs-binary comparison to `checks`, recording any mismatch in
+/// `issues` and flipping `drift`. A `null` documented list means the marker was
+/// absent from SKILL.md (a documentation-format problem), which also counts as
+/// drift since the governed surface can no longer be verified.
+fn doctorCheck(
+    ctx: *Context,
+    checks: *std.ArrayList(DoctorCheck),
+    issues: *std.ArrayList([]const u8),
+    drift: *bool,
+    name: []const u8,
+    label: []const u8,
+    binary: []const []const u8,
+    documented: ?[]const []const u8,
+) !void {
+    const docs = documented orelse {
+        drift.* = true;
+        try checks.append(ctx.arena, .{
+            .name = name,
+            .ok = false,
+            .detail = try std.fmt.allocPrint(ctx.arena, "SKILL.md does not document the {s}", .{label}),
+        });
+        try issues.append(ctx.arena, try std.fmt.allocPrint(ctx.arena, "installed SKILL.md does not document the {s}", .{label}));
+        return;
+    };
+    const d = try doctor.diff(ctx.arena, binary, docs);
+    if (!d.consistent()) {
+        drift.* = true;
+        if (d.binary_only.len > 0)
+            try issues.append(ctx.arena, try std.fmt.allocPrint(
+                ctx.arena,
+                "binary supports {s} not documented in SKILL.md: {s}",
+                .{ label, try joinList(ctx.arena, d.binary_only) },
+            ));
+        if (d.doc_only.len > 0)
+            try issues.append(ctx.arena, try std.fmt.allocPrint(
+                ctx.arena,
+                "SKILL.md documents {s} this binary does not support: {s}",
+                .{ label, try joinList(ctx.arena, d.doc_only) },
+            ));
+    }
+    try checks.append(ctx.arena, .{
+        .name = name,
+        .ok = d.consistent(),
+        .detail = if (d.consistent())
+            try std.fmt.allocPrint(ctx.arena, "{s} match", .{label})
+        else
+            try std.fmt.allocPrint(ctx.arena, "{s} differ", .{label}),
+        .binary_only = d.binary_only,
+        .doc_only = d.doc_only,
+    });
+}
+
+fn joinList(arena: std.mem.Allocator, items: []const []const u8) ![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    for (items, 0..) |it, idx| {
+        if (idx > 0) try buf.appendSlice(arena, ", ");
+        try buf.appendSlice(arena, it);
+    }
+    return buf.toOwnedSlice(arena);
 }
 
 // ---------------------------------------------------------------------------
