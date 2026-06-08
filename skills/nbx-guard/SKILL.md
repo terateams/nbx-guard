@@ -74,6 +74,7 @@ bash scripts/installer.sh
 ```text
 nbxg version                          打印版本与当前生效配置（无需 token）
 nbxg help                             机器可读的帮助（命令/字段/环境变量）
+nbxg doctor [--skill <dir>]           自检：安装的二进制与 SKILL.md/源码是否一致（离线、无需 token）
 nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并对每个字段标注策略类别
 nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（默认 brief 只读）
@@ -330,3 +331,9 @@ nbxg list backups               # 已存储的备份
 - 401/403 类 `netbox_error`：token 无效或权限不足（v2 token 形如 `nbt_<key>.<secret>`，
   请原样粘贴，不要截断）。
 - 想快速自检环境：`nbxg version`（无需 token，回显生效配置）。
+- 怀疑安装的二进制与本技能文档/源码不一致（版本漂移）：`nbxg doctor`（离线、无需 token）。
+  它会比对二进制自带的版本、资源类型、策略字段与安装的 `SKILL.md`（以及源码 `build.zig.zon`
+  版本），输出 `data.status`（`consistent` / `drift` / `skill_not_found`）、逐项 `checks`、
+  人类可读的 `issues` 与修复建议 `next_action`；发现漂移时退出码为 `2`。如检测失败，按
+  `next_action` 重跑 `scripts/installer.sh` 重装，使二进制与文档对齐。默认会在二进制所在目录、
+  `~/.agents/skills/nbx-guard/` 与当前仓库布局中查找 `SKILL.md`，也可用 `--skill <dir>` 指定。

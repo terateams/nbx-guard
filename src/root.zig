@@ -10,6 +10,7 @@ pub const approval = @import("approval.zig");
 pub const backup = @import("backup.zig");
 pub const audit = @import("audit.zig");
 pub const netbox = @import("netbox.zig");
+pub const doctor = @import("doctor.zig");
 pub const cli = @import("cli.zig");
 
 test {
@@ -24,5 +25,6 @@ test {
     _ = @import("backup.zig");
     _ = @import("audit.zig");
     _ = @import("netbox.zig");
+    _ = @import("doctor.zig");
     _ = @import("cli.zig");
 }

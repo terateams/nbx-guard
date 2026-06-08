@@ -115,6 +115,7 @@ API 完成——这些审批者级别的生命周期操作刻意不由 agent 网
 ```
 nbxg version                          打印版本与当前生效配置
 nbxg help                             显示帮助
+nbxg doctor [--skill <dir>]           自检：安装的二进制与 SKILL.md/源码是否一致（离线）
 nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并标注字段策略
 nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（brief 只读）
