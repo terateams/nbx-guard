@@ -11,6 +11,7 @@ preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/terateams/nbx-guard"
 edit-url-template = "https://github.com/terateams/nbx-guard/edit/main/docs/{path}"
 site-url = "/"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.fold]
 enable = true
@@ -18,3 +19,8 @@ level = 1
 
 [output.html.search]
 limit-results = 20
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
