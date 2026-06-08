@@ -15,7 +15,7 @@ const audit = @import("audit.zig");
 const netbox = @import("netbox.zig");
 const doctor = @import("doctor.zig");
 
-pub const version = "0.4.0";
+pub const version = "0.4.1";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
@@ -62,6 +62,10 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
         return cmdListResources(ctx, rest, false);
     } else if (eq(cmd, "search")) {
         return cmdListResources(ctx, rest, true);
+    } else if (eq(cmd, "export")) {
+        return cmdExport(ctx, rest);
+    } else if (eq(cmd, "snapshot")) {
+        return cmdSnapshot(ctx, rest);
     }
 
     try ctx.fail(cmd, .{
@@ -98,6 +102,11 @@ fn cmdVersion(ctx: *Context) !void {
 }
 
 fn printHelp(ctx: *Context) !void {
+    const ef = try policy.effectiveFields(ctx.arena, ctx.env);
+    var types: std.ArrayList([]const u8) = .empty;
+    try types.appendSlice(ctx.arena, &.{ "device", "interface", "ip-address", "prefix", "vlan", "contact" });
+    for (try envExtraResources(ctx)) |ex| try types.append(ctx.arena, ex.key);
+
     const Help = struct {
         name: []const u8 = "nbxg",
         version: []const u8 = version,
@@ -112,6 +121,10 @@ fn printHelp(ctx: *Context) !void {
             "                                 Discover NetBox resources (brief identifying fields; low-risk read)",
             "search <type> [-q text] [--filter k=v] [--limit N] [--all-fields]",
             "                                 Search NetBox resources by fuzzy text / field filters (read-only)",
+            "export <type> [--filter k=v] [-q text] [--fields basic|full] [--format json|jsonl] [--out path] [--limit N]",
+            "                                 Read-only export/snapshot of matching resources with provenance metadata",
+            "snapshot <type> <id> [--out path]",
+            "                                 Read-only point-in-time snapshot of one resource with provenance metadata",
             "describe [<type>] [--source options|openapi] [--refresh] [--offline]",
             "                                 Self-describe a type: action, fields, I/O schema (live-synced to NetBox)",
             "plan <type> <id> --set k=v ...   Create a change plan (policy + risk checked)",
@@ -122,9 +135,9 @@ fn printHelp(ctx: *Context) !void {
             "audit [--plan <id>]              Show the audit log",
             "list <plans|approvals|backups>   List local state",
         },
-        resource_types: []const []const u8 = &.{ "device", "interface", "ip-address", "prefix", "vlan", "contact" },
-        allowed_fields: []const []const u8 = &policy.allowed_fields,
-        high_risk_fields: []const []const u8 = &policy.high_risk_fields,
+        resource_types: []const []const u8,
+        allowed_fields: []const []const u8,
+        high_risk_fields: []const []const u8,
         env: []const []const u8 = &.{
             "NETBOX_URL            NetBox base URL (default http://localhost:8000)",
             "NETBOX_TOKEN          NetBox API token (required for plan/get/inspect/apply/restore)",
@@ -138,7 +151,11 @@ fn printHelp(ctx: *Context) !void {
         },
         principle: []const u8 = "Agent proposes intent; the CLI decides what is allowed.",
     };
-    try ctx.ok("help", Help{});
+    try ctx.ok("help", Help{
+        .resource_types = try types.toOwnedSlice(ctx.arena),
+        .allowed_fields = ef.allowed,
+        .high_risk_fields = ef.high_risk,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -413,13 +430,14 @@ fn cmdGet(ctx: *Context, rest: []const [:0]const u8, comptime command: []const u
         std.json.Value{ .null = {} };
 
     if (eq(command, "inspect")) {
+        const ef = try policy.effectiveFields(ctx.arena, ctx.env);
         try ctx.ok(command, .{
             .resource_type = rtype,
             .resource_id = rid,
             .resource = resource,
             .policy = .{
-                .allowed_fields = &policy.allowed_fields,
-                .high_risk_fields = &policy.high_risk_fields,
+                .allowed_fields = ef.allowed,
+                .high_risk_fields = ef.high_risk,
                 .note = "Other fields are denied by default. High-risk fields require approval.",
             },
         });
@@ -503,6 +521,36 @@ fn cmdDescribe(ctx: *Context, rest: []const [:0]const u8) !u8 {
             .name = fname,
             .class = "high_risk",
             .requires_approval = true,
+            .json_type = fd.json_type,
+            .example = fd.example,
+            .note = fd.note,
+        });
+    }
+    // Operator env additions (NBX_GUARD_ALLOWED_FIELDS / *_HIGH_RISK_FIELDS) are
+    // honored globally by the policy engine, so the self-description must surface
+    // them too — otherwise the agent can't discover a field the operator enabled.
+    // The live sync below annotates whether each is actually present on this type.
+    for (try envFieldList(ctx, "NBX_GUARD_HIGH_RISK_FIELDS")) |fname| {
+        if (describeHasField(fields.items, fname)) continue;
+        if (policy.classifyFieldEnv(ctx.env, fname) != .high_risk) continue;
+        const fd = schema.fieldDoc(fname) orelse genericFieldDoc(ctx, fname);
+        try fields.append(ctx.arena, .{
+            .name = fname,
+            .class = "high_risk",
+            .requires_approval = true,
+            .json_type = fd.json_type,
+            .example = fd.example,
+            .note = fd.note,
+        });
+    }
+    for (try envFieldList(ctx, "NBX_GUARD_ALLOWED_FIELDS")) |fname| {
+        if (describeHasField(fields.items, fname)) continue;
+        if (policy.classifyFieldEnv(ctx.env, fname) != .allowed) continue;
+        const fd = schema.fieldDoc(fname) orelse genericFieldDoc(ctx, fname);
+        try fields.append(ctx.arena, .{
+            .name = fname,
+            .class = "allowed",
+            .requires_approval = false,
             .json_type = fd.json_type,
             .example = fd.example,
             .note = fd.note,
@@ -1484,6 +1532,406 @@ fn cmdListResources(ctx: *Context, rest: []const [:0]const u8, is_search: bool) 
     return exit_ok;
 }
 
+// ---------------------------------------------------------------------------
+// export / snapshot (read-only review & audit-evidence artifacts)
+// ---------------------------------------------------------------------------
+
+/// Provenance metadata embedded in every export/snapshot artifact so it stays
+/// useful for later review, offline approval, and post-change comparison. The
+/// NetBox instance is identified by a short URL hash plus a host label rather
+/// than the full URL (which can carry credentials/ports), and the token is
+/// never recorded.
+const ExportMeta = struct {
+    tool: []const u8 = "nbxg",
+    nbxg_version: []const u8 = version,
+    /// "export" (collection) or "snapshot" (single object).
+    kind: []const u8,
+    resource_type: []const u8,
+    netbox_endpoint: []const u8,
+    /// Single-object id (snapshot only).
+    resource_id: ?[]const u8 = null,
+    /// Read-surface tier: "basic" (minimal/brief) or "full".
+    field_profile: []const u8,
+    /// Output encoding for the `--out` file (export only).
+    format: ?[]const u8 = null,
+    /// NetBox fuzzy `q` text, when given (export only).
+    query: ?[]const u8 = null,
+    /// Raw `key=value` filters passed through to NetBox (export only).
+    filters: []const []const u8 = &.{},
+    /// Caller-requested record cap, or null when exporting all matches.
+    limit: ?u32 = null,
+    offset: u32 = 0,
+    /// Number of objects captured.
+    count: ?usize = null,
+    /// Wall-clock seconds when the artifact was produced.
+    generated_at: i64,
+    /// First 16 hex chars of SHA-256(NETBOX_URL): a stable instance fingerprint.
+    netbox_url_hash: []const u8,
+    /// Human-readable host[:port] label for the NetBox instance.
+    netbox_instance: []const u8,
+    /// Active NetBox Branching schema id, when branch routing is enabled.
+    branch: ?[]const u8 = null,
+};
+
+/// Derive a human-readable `host[:port]` label from a NetBox base URL.
+fn instanceLabel(url: []const u8) []const u8 {
+    var s = url;
+    if (std.mem.indexOf(u8, s, "://")) |i| s = s[i + 3 ..];
+    if (std.mem.indexOfScalar(u8, s, '/')) |j| s = s[0..j];
+    return s;
+}
+
+/// First 16 hex chars of SHA-256(url): a short, stable instance fingerprint
+/// that identifies which NetBox an artifact came from without leaking the URL.
+fn urlHash16(arena: std.mem.Allocator, url: []const u8) ![]const u8 {
+    const full = try ids.sha256Hex(arena, url);
+    return full[0..16];
+}
+
+/// Write `data` to an arbitrary `--out` path, creating parent directories as
+/// needed. Unlike `Store`, exports may target any path the operator chooses.
+fn writeOutFile(ctx: *Context, out_path: []const u8, data: []const u8) !void {
+    const io = ctx.io;
+    const d = std.Io.Dir.cwd();
+    if (std.fs.path.dirname(out_path)) |parent| {
+        if (parent.len > 0) try d.createDirPath(io, parent);
+    }
+    var file = try d.createFile(io, out_path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, data);
+}
+
+/// Encode an export as JSONL: a leading `{"_meta": ...}` provenance line so the
+/// artifact is self-describing, then one minified object per line.
+fn renderJsonl(ctx: *Context, meta: ExportMeta, records: []const std.json.Value) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(ctx.gpa);
+    const meta_line = try std.json.Stringify.valueAlloc(ctx.gpa, .{ ._meta = meta }, .{});
+    defer ctx.gpa.free(meta_line);
+    try buf.appendSlice(ctx.gpa, meta_line);
+    try buf.append(ctx.gpa, '\n');
+    for (records) |rec| {
+        const line = try std.json.Stringify.valueAlloc(ctx.gpa, rec, .{});
+        defer ctx.gpa.free(line);
+        try buf.appendSlice(ctx.gpa, line);
+        try buf.append(ctx.gpa, '\n');
+    }
+    return buf.toOwnedSlice(ctx.gpa);
+}
+
+/// `export <type>`: read-only, filtered, auto-paginated capture of every
+/// matching NetBox object, with provenance metadata for later review. The read
+/// surface is tiered via `--fields basic|full` (basic uses NetBox `brief`).
+fn cmdExport(ctx: *Context, rest: []const [:0]const u8) !u8 {
+    const command = "export";
+
+    var rtype: ?[]const u8 = null;
+    var filters: std.ArrayList([]const u8) = .empty;
+    var query_text: ?[]const u8 = null;
+    var field_profile: []const u8 = "basic";
+    var format: []const u8 = "json";
+    var out_path: ?[]const u8 = null;
+    var limit: ?u32 = null;
+    var offset: u32 = 0;
+
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (eq(a, "--filter")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                try filters.append(ctx.arena, rest[i]);
+            }
+        } else if (std.mem.startsWith(u8, a, "--filter=")) {
+            try filters.append(ctx.arena, a["--filter=".len..]);
+        } else if (eq(a, "-q") or eq(a, "--query") or eq(a, "--name")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                query_text = rest[i];
+            }
+        } else if (std.mem.startsWith(u8, a, "--query=")) {
+            query_text = a["--query=".len..];
+        } else if (std.mem.startsWith(u8, a, "--name=")) {
+            query_text = a["--name=".len..];
+        } else if (eq(a, "--fields")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                field_profile = rest[i];
+            }
+        } else if (std.mem.startsWith(u8, a, "--fields=")) {
+            field_profile = a["--fields=".len..];
+        } else if (eq(a, "--all-fields")) {
+            field_profile = "full";
+        } else if (eq(a, "--format")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                format = rest[i];
+            }
+        } else if (std.mem.startsWith(u8, a, "--format=")) {
+            format = a["--format=".len..];
+        } else if (eq(a, "--out")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                out_path = rest[i];
+            }
+        } else if (std.mem.startsWith(u8, a, "--out=")) {
+            out_path = a["--out=".len..];
+        } else if (eq(a, "--limit")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                limit = parseU32(rest[i]) orelse return failIntFlag(ctx, command, "--limit");
+            }
+        } else if (std.mem.startsWith(u8, a, "--limit=")) {
+            limit = parseU32(a["--limit=".len..]) orelse return failIntFlag(ctx, command, "--limit");
+        } else if (eq(a, "--offset")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                offset = parseU32(rest[i]) orelse return failIntFlag(ctx, command, "--offset");
+            }
+        } else if (std.mem.startsWith(u8, a, "--offset=")) {
+            offset = parseU32(a["--offset=".len..]) orelse return failIntFlag(ctx, command, "--offset");
+        } else if (!std.mem.startsWith(u8, a, "-") and rtype == null) {
+            rtype = a;
+        }
+    }
+
+    const rt = rtype orelse {
+        try ctx.fail(command, .{
+            .kind = .invalid_args,
+            .message = "expected <type>",
+            .next_action = "example: nbxg export device --filter site=tokyo --format json",
+        });
+        return exit_client;
+    };
+
+    // Read-surface tier: basic == NetBox brief (minimal, low-risk); full == all
+    // attributes. Default-deny on anything else so a typo can't widen the read.
+    const basic = eq(field_profile, "basic") or eq(field_profile, "brief");
+    const full = eq(field_profile, "full") or eq(field_profile, "all");
+    if (!basic and !full) {
+        try ctx.fail(command, .{
+            .kind = .invalid_args,
+            .message = "fields profile must be 'basic' or 'full'",
+            .next_action = "use --fields basic (minimal read surface) or --fields full",
+        });
+        return exit_client;
+    }
+    field_profile = if (basic) "basic" else "full";
+
+    const fmt_jsonl = eq(format, "jsonl");
+    if (!eq(format, "json") and !fmt_jsonl) {
+        try ctx.fail(command, .{
+            .kind = .invalid_args,
+            .message = "format must be 'json' or 'jsonl'",
+            .next_action = "use --format json or --format jsonl",
+        });
+        return exit_client;
+    }
+
+    const ep = netbox.endpointFor(ctx.env, rt) orelse return failUnknownType(ctx, command, rt);
+    if (ctx.config.netbox_token == null) return failNoToken(ctx, command);
+
+    // Auto-paginate the collection so the export captures every matching object,
+    // not just one page. Bounded by --limit, or a hard cap when exporting all.
+    const page_size: u32 = 1000;
+    const hard_cap: usize = 100_000;
+    const max_records: usize = if (limit) |l| l else hard_cap;
+
+    var client = netbox.Client.init(ctx);
+    defer client.deinit();
+
+    var records: std.ArrayList(std.json.Value) = .empty;
+    var total: i64 = 0;
+    var cur_offset: u32 = offset;
+
+    while (records.items.len < max_records) {
+        const remaining = max_records - records.items.len;
+        var this_limit: u32 = page_size;
+        if (remaining < page_size) this_limit = @intCast(remaining);
+        if (this_limit == 0) break;
+
+        var qs: std.ArrayList(u8) = .empty;
+        try appendU32Param(ctx.arena, &qs, "limit", this_limit);
+        try appendU32Param(ctx.arena, &qs, "offset", cur_offset);
+        if (basic) try appendParam(ctx.arena, &qs, "brief", "true");
+        if (query_text) |q| try appendParam(ctx.arena, &qs, "q", q);
+        for (filters.items) |f| {
+            const eqi = std.mem.indexOfScalar(u8, f, '=') orelse continue;
+            try appendParam(ctx.arena, &qs, f[0..eqi], f[eqi + 1 ..]);
+        }
+
+        const res = client.list(rt, qs.items) catch |err| return failNetboxConn(ctx, command, err);
+        defer ctx.gpa.free(res.body);
+        if (!res.ok) return failNetboxStatus(ctx, command, res);
+
+        const parsed = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, res.body, .{}) catch
+            std.json.Value{ .null = {} };
+        var page: []const std.json.Value = &.{};
+        switch (parsed) {
+            .object => |o| {
+                if (o.get("count")) |c| switch (c) {
+                    .integer => |n| total = n,
+                    else => {},
+                };
+                if (o.get("results")) |r| switch (r) {
+                    .array => |arr| page = arr.items,
+                    else => {},
+                };
+            },
+            else => {},
+        }
+        if (page.len == 0) break;
+        for (page) |rec| {
+            if (records.items.len >= max_records) break;
+            try records.append(ctx.arena, rec);
+        }
+        cur_offset += @intCast(page.len);
+        if (@as(i64, @intCast(cur_offset)) >= total) break;
+    }
+
+    const meta = ExportMeta{
+        .kind = "export",
+        .resource_type = rt,
+        .netbox_endpoint = ep,
+        .field_profile = field_profile,
+        .format = format,
+        .query = query_text,
+        .filters = filters.items,
+        .limit = limit,
+        .offset = offset,
+        .count = records.items.len,
+        .generated_at = nsToSecs(ctx.nowNanos()),
+        .netbox_url_hash = try urlHash16(ctx.arena, ctx.config.netbox_url),
+        .netbox_instance = instanceLabel(ctx.config.netbox_url),
+        .branch = netbox.activeBranch(ctx.config),
+    };
+
+    if (out_path) |op| {
+        const bytes = if (fmt_jsonl)
+            try renderJsonl(ctx, meta, records.items)
+        else
+            try std.json.Stringify.valueAlloc(ctx.gpa, .{ .metadata = meta, .records = records.items }, .{ .whitespace = .indent_2 });
+        defer ctx.gpa.free(bytes);
+        writeOutFile(ctx, op, bytes) catch |err| return failOutWrite(ctx, command, op, err);
+        try ctx.ok(command, .{
+            .metadata = meta,
+            .out = op,
+            .bytes = bytes.len,
+            .note = if (basic)
+                "basic field profile: minimal, low-risk read surface. Use --fields full for complete attributes."
+            else
+                "full field profile: complete attributes (wider read surface).",
+            .next_action = "review or archive the export; re-run later and diff to detect drift",
+        });
+    } else {
+        try ctx.ok(command, .{
+            .metadata = meta,
+            .records = records.items,
+            .note = "no --out given: records embedded in this response. Pass --out <path> with --format json|jsonl to persist.",
+            .next_action = "pass --out <path> to persist this export for offline review",
+        });
+    }
+    return exit_ok;
+}
+
+/// `snapshot <type> <id>`: read-only point-in-time capture of one object with
+/// provenance metadata, for pre-change review and post-change comparison.
+fn cmdSnapshot(ctx: *Context, rest: []const [:0]const u8) !u8 {
+    const command = "snapshot";
+
+    var rtype: ?[]const u8 = null;
+    var rid: ?[]const u8 = null;
+    var out_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (eq(a, "--out")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                out_path = rest[i];
+            }
+        } else if (std.mem.startsWith(u8, a, "--out=")) {
+            out_path = a["--out=".len..];
+        } else if (!std.mem.startsWith(u8, a, "-")) {
+            if (rtype == null) {
+                rtype = a;
+            } else if (rid == null) {
+                rid = a;
+            }
+        }
+    }
+
+    const rt = rtype orelse return failSnapshotUsage(ctx);
+    const id = rid orelse return failSnapshotUsage(ctx);
+
+    const ep = netbox.endpointFor(ctx.env, rt) orelse return failUnknownType(ctx, command, rt);
+    if (ctx.config.netbox_token == null) return failNoToken(ctx, command);
+
+    var client = netbox.Client.init(ctx);
+    defer client.deinit();
+    const res = client.get(rt, id) catch |err| return failNetboxConn(ctx, command, err);
+    defer ctx.gpa.free(res.body);
+    if (!res.ok) return failNetboxStatus(ctx, command, res);
+
+    const resource = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, res.body, .{}) catch
+        std.json.Value{ .null = {} };
+
+    const meta = ExportMeta{
+        .kind = "snapshot",
+        .resource_type = rt,
+        .netbox_endpoint = ep,
+        .resource_id = id,
+        .field_profile = "full",
+        .count = 1,
+        .generated_at = nsToSecs(ctx.nowNanos()),
+        .netbox_url_hash = try urlHash16(ctx.arena, ctx.config.netbox_url),
+        .netbox_instance = instanceLabel(ctx.config.netbox_url),
+        .branch = netbox.activeBranch(ctx.config),
+    };
+
+    if (out_path) |op| {
+        const bytes = try std.json.Stringify.valueAlloc(ctx.gpa, .{ .metadata = meta, .resource = resource }, .{ .whitespace = .indent_2 });
+        defer ctx.gpa.free(bytes);
+        writeOutFile(ctx, op, bytes) catch |err| return failOutWrite(ctx, command, op, err);
+        try ctx.ok(command, .{
+            .metadata = meta,
+            .out = op,
+            .bytes = bytes.len,
+            .note = "read-only snapshot written; the file embeds provenance metadata for later review/comparison",
+            .next_action = "review or archive the snapshot; re-run later and diff to detect change",
+        });
+    } else {
+        try ctx.ok(command, .{
+            .metadata = meta,
+            .resource = resource,
+            .note = "read-only snapshot (no --out given, embedded in this response)",
+            .next_action = "pass --out <path> to persist this snapshot for offline review",
+        });
+    }
+    return exit_ok;
+}
+
+fn failSnapshotUsage(ctx: *Context) !u8 {
+    try ctx.fail("snapshot", .{
+        .kind = .invalid_args,
+        .message = "expected <type> <id>",
+        .next_action = "example: nbxg snapshot device 123 --out snapshots/device-123.json",
+    });
+    return exit_client;
+}
+
+fn failOutWrite(ctx: *Context, command: []const u8, path: []const u8, err: anyerror) !u8 {
+    const msg = std.fmt.allocPrint(ctx.arena, "could not write {s}: {s}", .{ path, @errorName(err) }) catch
+        "could not write output file";
+    try ctx.fail(command, .{
+        .kind = .io_error,
+        .message = msg,
+        .next_action = "check the --out path is writable and its parent directory is accessible",
+    });
+    return exit_upstream;
+}
+
 fn parseU32(s: []const u8) ?u32 {
     return std.fmt.parseInt(u32, s, 10) catch null;
 }
@@ -1584,6 +2032,11 @@ fn syntheticDoc(ctx: *Context, key: []const u8) !?schema.ResourceDoc {
 
 fn inList(list: []const []const u8, name: []const u8) bool {
     for (list) |x| if (eq(x, name)) return true;
+    return false;
+}
+
+fn describeHasField(list: []const DescribeField, name: []const u8) bool {
+    for (list) |f| if (eq(f.name, name)) return true;
     return false;
 }
 
@@ -1722,4 +2175,29 @@ fn failNetboxStatus(ctx: *Context, command: []const u8, res: netbox.Result) !u8 
         .next_action = "inspect the resource and adjust the plan",
     });
     return exit_upstream;
+}
+
+// ---------------------------------------------------------------------------
+// tests
+// ---------------------------------------------------------------------------
+
+test "instanceLabel extracts host[:port] from a NetBox URL" {
+    try std.testing.expectEqualStrings("netbox.example.com", instanceLabel("https://netbox.example.com"));
+    try std.testing.expectEqualStrings("127.0.0.1:8000", instanceLabel("http://127.0.0.1:8000"));
+    try std.testing.expectEqualStrings("netbox.local:8080", instanceLabel("https://netbox.local:8080/api"));
+    // no scheme: still trims any path
+    try std.testing.expectEqualStrings("host", instanceLabel("host/x"));
+}
+
+test "urlHash16 is a stable 16-hex instance fingerprint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const h1 = try urlHash16(a, "https://netbox.example.com");
+    try std.testing.expectEqual(@as(usize, 16), h1.len);
+    const h2 = try urlHash16(a, "https://netbox.example.com");
+    try std.testing.expectEqualStrings(h1, h2);
+    // matches the first 16 hex chars of the full SHA-256 of the same URL
+    const full = try ids.sha256Hex(a, "https://netbox.example.com");
+    try std.testing.expectEqualStrings(full[0..16], h1);
 }

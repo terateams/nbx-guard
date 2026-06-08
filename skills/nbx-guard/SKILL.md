@@ -79,6 +79,8 @@ nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并对每个字段标注策略类别
 nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（默认 brief 只读）
 nbxg search <type> -q <text> [选项]   按 NetBox q 模糊搜索某类型的对象（发现 id）
+nbxg export <type> [选项]             只读导出/快照匹配资源（含来源元数据，供评审/审计/对比）
+nbxg snapshot <type> <id> [--out p]   只读快照单个资源（含来源元数据）
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：列出可写字段 / 输入输出 schema，并实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险 + 漂移基线）
@@ -118,6 +120,27 @@ nbxg get contact 3                           # 用上一步发现的 id 读取
 
 ---
 
+## 只读导出与快照（评审 / 审计 / 对比）
+
+变更前评审、审计证据、离线审批与变更后对比时，用 `export`/`snapshot` 把当前状态固化为带**来源
+元数据**的工件（只读、不触发审批、需要 token）：
+
+- `nbxg export <type> [--filter k=v ...] [-q text] [--fields basic|full] [--format json|jsonl] [--out path] [--limit n]`
+  自动翻页抓全所有匹配对象。`--fields basic`（默认）走 NetBox `brief` 最小读取面；`full` 返回完整属性。
+- `nbxg snapshot <type> <id> [--out path]`：抓取单个对象的当前状态。
+
+工件/响应里的 `metadata` 含 `resource_type`、`filters`、`field_profile`、`format`、`count`、
+`generated_at`、`netbox_url_hash`（NetBox URL 指纹）、`netbox_instance`、`nbxg_version`（启用分支时
+还含 `branch`）。token 绝不写入工件。给 `--out` 写文件（自动建父目录），否则把内容嵌入响应 `data`。
+
+```text
+nbxg export device --filter site=tokyo --fields basic --format json
+nbxg export prefix --filter status=active --format jsonl --out snapshots/prefixes.jsonl
+nbxg snapshot device 123 --out snapshots/device-123.json
+```
+
+---
+
 ## 字段策略（默认拒绝）
 
 只有被策略显式收录的字段才能写入：
@@ -126,6 +149,11 @@ nbxg get contact 3                           # 用上一步发现的 id 读取
 - **高风险（必须经 `approve` 才能 apply）**：`status`、`role`、`site`、`rack`、`prefix`、`address`、`groups`。
 - **其它一切字段**：拒绝（`error.kind = policy_denied`）。
 - **动作**：仅允许 `update`；`create`/`delete`/`bulk_delete` 一律拒绝。
+
+> **需要的字段被 `policy_denied`？** 不要反复重试，也不要自行设置 env 绕过。请**提示人工算子**用
+> `NBX_GUARD_ALLOWED_FIELDS`（低风险）或 `NBX_GUARD_HIGH_RISK_FIELDS`（需审批）放行该字段（例如设备
+> `serial` 序列号）。放行后该字段会**自动出现在** `describe`/`inspect`/`help` 的字段清单中（并实时标注
+> `present_in_netbox`），你即可照常 `plan → apply`，无需改源码。
 
 `--set` 取值解析：默认按**字符串**；合法 JSON 的数组/对象按 JSON 解析。
 

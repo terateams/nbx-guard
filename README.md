@@ -120,6 +120,8 @@ nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并标注字段策略
 nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（brief 只读）
 nbxg search <type> -q <text> [选项]   按 NetBox q 模糊搜索某类型的对象
+nbxg export <type> [选项]             只读导出/快照匹配资源（含来源元数据）
+nbxg snapshot <type> <id> [--out p]   只读快照单个资源（含来源元数据）
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：可写字段 / 输入输出 schema，实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
