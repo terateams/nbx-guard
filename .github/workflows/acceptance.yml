@@ -50,5 +50,27 @@ jobs:
           docker compose version
           jq --version
 
+      # 缓存 NetBox/postgres/redis 镜像，避免每次 CI 都从 Docker Hub 重新拉取约 1.5GB
+      # （并规避匿名拉取限流）。键随 docker-compose.yml 变化失效，镜像 tag 一改即自动重建。
+      - name: Cache NetBox stack images
+        id: stack-images
+        uses: actions/cache@v4
+        with:
+          path: /tmp/nbx-acc-images
+          key: nbx-acc-images-${{ hashFiles('acceptance/docker-compose.yml') }}
+
+      - name: Load cached stack images
+        if: steps.stack-images.outputs.cache-hit == 'true'
+        run: docker load -i /tmp/nbx-acc-images/stack.tar
+
+      - name: Pull & cache stack images
+        if: steps.stack-images.outputs.cache-hit != 'true'
+        run: |
+          docker compose -f acceptance/docker-compose.yml pull
+          mkdir -p /tmp/nbx-acc-images
+          # shellcheck disable=SC2046
+          docker save -o /tmp/nbx-acc-images/stack.tar \
+            $(docker compose -f acceptance/docker-compose.yml config --images | sort -u)
+
       - name: Run NetBox acceptance
         run: bash acceptance/run.sh
