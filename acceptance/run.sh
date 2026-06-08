@@ -252,6 +252,35 @@ check "list approvals: count>=1" "$(j '.data.count >= 1')" "true"
 guard list backups
 check "list backups: count>=1" "$(j '.data.count >= 1')" "true"
 
+# 18) reject —— 被拒的计划永不可 apply
+guard plan ip-address "$IP_ID" --set description=will-reject
+check "plan(待拒): 退出码 0" "$GRC" "0"
+PLAN_REJ=$(j '.data.plan.plan_id')
+guard reject --plan "$PLAN_REJ" --note "not needed"
+check "reject: 退出码 0" "$GRC" "0"
+check "reject: status=rejected" "$(j '.data.status')" "rejected"
+guard apply --plan "$PLAN_REJ"
+check "apply(已拒): 退出码 2" "$GRC" "2"
+check "apply(已拒): error.kind=plan_state_error" "$(j '.error.kind')" "plan_state_error"
+check "apply(已拒): NetBox 侧 description 未变" "$(nb_field '.description')" "seed"
+guard audit
+check "audit: 含 rejected 事件" "$(j '[.data.entries[] | select(.event=="rejected")] | length >= 1')" "true"
+
+# 19) drift —— 计划创建后资源被外部改动，apply 必须拒绝（且在写入/备份前即拦截）
+guard list backups; BKP_BEFORE=$(j '.data.count')
+guard plan ip-address "$IP_ID" --set description=planned-desc
+check "plan(漂移前): 退出码 0" "$GRC" "0"
+PLAN_DRIFT=$(j '.data.plan.plan_id')
+curl -fsS -X PATCH "$BASE/api/ipam/ip-addresses/$IP_ID/" \
+  -H "Authorization: Token $TOKEN" -H "Content-Type: application/json" \
+  -d '{"description":"changed-externally"}' >/dev/null
+guard apply --plan "$PLAN_DRIFT"
+check "apply(漂移): 退出码 2" "$GRC" "2"
+check "apply(漂移): error.kind=conflict" "$(j '.error.kind')" "conflict"
+check "apply(漂移): 未写入（NetBox 仍为外部值）" "$(nb_field '.description')" "changed-externally"
+guard list backups
+check "apply(漂移): 未新增备份记录" "$(j '.data.count')" "$BKP_BEFORE"
+
 # --- 汇总 ------------------------------------------------------------------
 echo ""
 echo "================ 验收汇总 ================"

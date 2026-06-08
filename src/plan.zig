@@ -28,6 +28,9 @@ pub const Plan = struct {
     backup_id: ?[]const u8 = null,
     created_at: i64,
     netbox_url: []const u8,
+    /// Values of the changed fields as observed at plan time. Used at apply to
+    /// detect drift. Defaults to null for plans created before this was added.
+    base_values: std.json.Value = .{ .null = {} },
 };
 
 /// Convert `key=value` pairs into a JSON object. Each value is parsed as JSON
@@ -121,4 +124,11 @@ test "buildChanges parses types and computeHash is stable" {
     const h2 = try computeHash(a, "device", "1", "update", ch);
     try testing.expectEqualStrings(h1, h2);
     try testing.expectEqual(@as(usize, 64), h1.len);
+
+    // Any change to the intent must change the hash (basis of tamper detection).
+    const ch2 = try buildChanges(a, &.{.{ .key = "description", .value = "edge router 2" }});
+    const h3 = try computeHash(a, "device", "1", "update", ch2);
+    try testing.expect(!std.mem.eql(u8, h1, h3));
+    const h4 = try computeHash(a, "device", "2", "update", ch);
+    try testing.expect(!std.mem.eql(u8, h1, h4));
 }

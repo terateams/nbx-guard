@@ -42,6 +42,8 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
         return cmdPlan(ctx, rest);
     } else if (eq(cmd, "approve")) {
         return cmdApprove(ctx, rest);
+    } else if (eq(cmd, "reject")) {
+        return cmdReject(ctx, rest);
     } else if (eq(cmd, "apply")) {
         return cmdApply(ctx, rest);
     } else if (eq(cmd, "restore")) {
@@ -97,6 +99,7 @@ fn printHelp(ctx: *Context) !void {
             "inspect <type> <id>              Read a resource annotated with field policy",
             "plan <type> <id> --set k=v ...   Create a change plan (policy + risk checked)",
             "approve --plan <id> [--note x]   Approve a high-risk plan (binds plan_hash)",
+            "reject --plan <id> [--note x]    Reject a plan so it can never be applied",
             "apply --plan <id>                Backup then apply an approved/low-risk plan",
             "restore --backup <id>            Revert a resource from a backup snapshot",
             "audit [--plan <id>]              Show the audit log",
@@ -107,7 +110,7 @@ fn printHelp(ctx: *Context) !void {
         high_risk_fields: []const []const u8 = &policy.high_risk_fields,
         env: []const []const u8 = &.{
             "NETBOX_URL            NetBox base URL (default http://localhost:8000)",
-            "NETBOX_TOKEN          NetBox API token (required for get/inspect/apply/restore)",
+            "NETBOX_TOKEN          NetBox API token (required for plan/get/inspect/apply/restore)",
             "NBX_GUARD_STATE_DIR   Local state directory (default .nbx-guard)",
             "NBX_GUARD_BRANCHING   Use NetBox Branching (1/true)",
         },
@@ -204,6 +207,18 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
         return exit_client;
     }
 
+    // Observe current state so the plan binds to a concrete baseline; apply uses
+    // it to detect drift. The CLI holds NetBox creds, so this needs a token.
+    if (ctx.config.netbox_token == null) return failNoToken(ctx, "plan");
+    var client = netbox.Client.init(ctx);
+    defer client.deinit();
+    const base_res = client.get(rtype, rid) catch |err| return failNetboxConn(ctx, "plan", err);
+    defer ctx.gpa.free(base_res.body);
+    if (!base_res.ok) return failNetboxStatus(ctx, "plan", base_res);
+    const base_snapshot = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, base_res.body, .{}) catch
+        std.json.Value{ .null = {} };
+    const base_values = try backup.priorValues(ctx.arena, base_snapshot, fields);
+
     const store = Store.init(ctx);
     try store.ensureDirs();
 
@@ -221,6 +236,7 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
         .status = if (eval.requires_approval) plan.status_pending_approval else plan.status_planned,
         .created_at = nsToSecs(now_ns),
         .netbox_url = ctx.config.netbox_url,
+        .base_values = base_values,
     };
     try plan.save(store, p);
 
@@ -311,6 +327,62 @@ fn cmdApprove(ctx: *Context, rest: []const [:0]const u8) !u8 {
 }
 
 // ---------------------------------------------------------------------------
+// reject
+// ---------------------------------------------------------------------------
+
+fn cmdReject(ctx: *Context, rest: []const [:0]const u8) !u8 {
+    const plan_id = findFlag(rest, "--plan") orelse return failMissingFlag(ctx, "reject", "--plan");
+    const note = findFlag(rest, "--note");
+
+    const store = Store.init(ctx);
+    try store.ensureDirs();
+
+    const loaded = (try plan.load(store, plan_id)) orelse return failPlanNotFound(ctx, "reject", plan_id);
+    defer loaded.deinit();
+    var p = loaded.value;
+
+    if (eq(p.status, plan.status_applied)) {
+        try ctx.fail("reject", .{
+            .kind = .plan_state_error,
+            .message = "an applied plan cannot be rejected",
+            .next_action = "create a new plan for further changes",
+        });
+        return exit_client;
+    }
+    if (eq(p.status, plan.status_rejected)) {
+        try ctx.fail("reject", .{
+            .kind = .plan_state_error,
+            .message = "plan is already rejected",
+            .next_action = "create a new plan",
+        });
+        return exit_client;
+    }
+
+    p.status = plan.status_rejected;
+    try plan.save(store, p);
+
+    const now_ns = ctx.nowNanos();
+    try audit.append(store, .{
+        .ts = nsToSecs(now_ns),
+        .request_id = try ids.genId(ctx.arena, "req", now_ns),
+        .event = "rejected",
+        .plan_id = p.plan_id,
+        .approval_id = p.approval_id,
+        .resource_type = p.resource_type,
+        .resource_id = p.resource_id,
+        .risk_level = p.risk_level,
+        .detail = note,
+    });
+
+    try ctx.ok("reject", .{
+        .plan_id = p.plan_id,
+        .status = p.status,
+        .next_action = "this plan is rejected and can never be applied",
+    });
+    return exit_ok;
+}
+
+// ---------------------------------------------------------------------------
 // apply
 // ---------------------------------------------------------------------------
 
@@ -333,6 +405,14 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
         });
         return exit_client;
     }
+    if (eq(p.status, plan.status_rejected)) {
+        try ctx.fail("apply", .{
+            .kind = .plan_state_error,
+            .message = "plan was rejected and cannot be applied",
+            .next_action = "create a new plan",
+        });
+        return exit_client;
+    }
     if (p.requires_approval and !eq(p.status, plan.status_approved)) {
         try ctx.fail("apply", .{
             .kind = .not_approved,
@@ -341,6 +421,36 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
             .next_action = "run `nbx-guard approve --plan " ++ "" ++ "<plan_id>` first",
         });
         return exit_client;
+    }
+
+    // Integrity: the stored plan must still hash to its recorded plan_hash, and a
+    // high-risk plan's approval must bind that exact hash. This makes the
+    // approve->apply window tamper-evident instead of merely status-checked.
+    const recomputed = try plan.computeHash(ctx.arena, p.resource_type, p.resource_id, p.action, p.changes);
+    if (!eq(recomputed, p.plan_hash)) {
+        try ctx.fail("apply", .{
+            .kind = .plan_state_error,
+            .message = "plan integrity check failed: stored plan does not match its plan_hash",
+            .risk_level = p.risk_level,
+            .next_action = "discard this tampered plan and create a new one",
+        });
+        return exit_client;
+    }
+    if (p.requires_approval) {
+        const bound = if (p.approval_id) |aid| (try approval.load(store, aid)) else null;
+        defer {
+            if (bound) |bp| bp.deinit();
+        }
+        const bound_ok = if (bound) |bp| eq(bp.value.plan_hash, p.plan_hash) else false;
+        if (!bound_ok) {
+            try ctx.fail("apply", .{
+                .kind = .plan_state_error,
+                .message = "approval does not match this plan (missing approval or plan_hash mismatch)",
+                .risk_level = p.risk_level,
+                .next_action = "re-approve the plan before applying",
+            });
+            return exit_client;
+        }
     }
 
     // Re-validate policy on the stored changes (defense in depth).
@@ -369,6 +479,17 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
     const snapshot = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, get_res.body, .{}) catch
         std.json.Value{ .null = {} };
     const prior = try backup.priorValues(ctx.arena, snapshot, fields);
+
+    // Drift: the changed fields must match the baseline captured at plan time.
+    if (!isNull(p.base_values) and !jsonEqual(ctx.arena, prior, p.base_values)) {
+        try ctx.fail("apply", .{
+            .kind = .conflict,
+            .message = "resource changed since the plan was created (drift detected)",
+            .risk_level = p.risk_level,
+            .next_action = "re-create the plan against the current state",
+        });
+        return exit_client;
+    }
 
     const b: backup.Backup = .{
         .backup_id = try ids.genId(ctx.arena, "bkp", now_ns),
@@ -628,6 +749,22 @@ fn nsToSecs(ns: i128) i64 {
 
 fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+fn isNull(v: std.json.Value) bool {
+    return switch (v) {
+        .null => true,
+        else => false,
+    };
+}
+
+/// Structural equality of two JSON values via canonical serialization. Both
+/// sides are built field-by-field in the same field order, so a byte compare of
+/// the serialized form is sufficient here.
+fn jsonEqual(arena: std.mem.Allocator, a: std.json.Value, b: std.json.Value) bool {
+    const sa = std.json.Stringify.valueAlloc(arena, a, .{}) catch return false;
+    const sb = std.json.Stringify.valueAlloc(arena, b, .{}) catch return false;
+    return std.mem.eql(u8, sa, sb);
 }
 
 // shared failure responses -------------------------------------------------

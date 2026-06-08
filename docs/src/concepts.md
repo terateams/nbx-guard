@@ -14,7 +14,8 @@ plan ──> (approve) ──> apply ──> (restore)
 
 一个 **plan** 捕获 agent 的意图：一个资源（`type` + `id`）、动作（MVP 中恒为
 `update`），以及一组字段 `changes`。创建 plan 会运行[策略](./policy.md)引擎并赋予
-一个风险等级。此阶段不会向 NetBox 写入任何东西。
+一个风险等级。此阶段不会向 NetBox 写入任何东西，但会读取一次当前状态，记录被改动
+字段的**基线值**，供 apply 时检测外部漂移。
 
 每个 plan 都有一个状态：
 
@@ -24,13 +25,15 @@ plan ──> (approve) ──> apply ──> (restore)
 | `pending_approval` | 高风险 plan，需先 `approve` 才能应用。 |
 | `approved` | 已审批的高风险 plan。 |
 | `applied` | 变更已推送到 NetBox。 |
-| `rejected` | 预留给被拒绝的 plan。 |
+| `rejected` | 被 `reject` 命令驳回的 plan；不能再 `apply`。 |
 
 ## `plan_hash`
 
 每个 plan 都有一个确定性的 **`plan_hash`**——对规范化的
 `{resource_type, resource_id, action, changes}` 求 SHA-256。它是 plan 的防篡改身份：
-审批绑定到这个哈希，因此一个已审批的 plan 无法被悄悄篡改后再应用。
+审批绑定到这个哈希，因此一个已审批的 plan 无法被悄悄篡改后再应用。apply 时会重新
+计算该哈希并与存储值比对；高风险 plan 还会校验审批记录绑定的是同一个哈希，任一
+不符都会以 `conflict` 拒绝。
 
 ## 风险等级
 
@@ -53,12 +56,18 @@ plan ──> (approve) ──> apply ──> (restore)
 完整快照，外加*恰好*那些将被改动字段的*原值（prior values）*。`restore` 正是用它
 来回滚。
 
+## 漂移检测（Drift）
+
+plan 创建时会记录被改动字段的**基线值**。apply 前会再次读取资源，如果这些字段的
+当前值与基线不一致——说明资源在 plan 之后被别处改动了——apply 会在写入任何备份或
+变更之前以 `conflict` 拒绝，避免覆盖你没预期到的状态。
+
 ## Audit（审计）
 
-每一个有意义的事件——`plan_created`、`approved`、`applied`、`apply_failed`、
-`restored`——都会被追加到一个只追加（append-only）的 JSONL **审计**日志里。每条记录
-都关联相应的 `request_id`、`plan_id`、`approval_id` 和 `backup_id`，因此任何变更都能
-被端到端地追溯。
+每一个有意义的事件——`plan_created`、`approved`、`rejected`、`applied`、
+`apply_failed`、`restored`——都会被追加到一个只追加（append-only）的 JSONL **审计**
+日志里。每条记录都关联相应的 `request_id`、`plan_id`、`approval_id` 和 `backup_id`，
+因此任何变更都能被端到端地追溯。
 
 ## Request id（请求 id）
 

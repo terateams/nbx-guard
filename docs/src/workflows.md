@@ -36,6 +36,16 @@ nbx-guard approve --plan plan_... --note "approved by netops"
 nbx-guard apply --plan plan_...      # 现在被允许
 ```
 
+## 驳回 plan（reject）
+
+已创建但你不想执行的 plan，可以显式驳回；之后再 `apply` 会被拒绝：
+
+```sh
+nbx-guard reject --plan plan_... --note "暂不执行"
+nbx-guard apply  --plan plan_...
+# 被拒：error.kind = "plan_state_error"
+```
+
 ## 被拒绝的变更
 
 改动策略之外字段的变更，会在 plan 阶段就被拒绝——不存储任何东西：

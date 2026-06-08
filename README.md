@@ -23,6 +23,9 @@ Agent / LLM ──> nbx-guard CLI (Zig) ──> NetBox REST API
 - **默认拒绝（default-deny）**——只有被策略明确分类的字段才可写。
 - **先规划（plan first）**——没有已存储的 `plan` 就不会发生任何写入；`apply` 只接受 `plan_id`。
 - **审批门禁**——高风险字段需要一份绑定到该 plan 的 `plan_hash` 的审批。
+- **漂移与完整性检查**——apply 前重算 `plan_hash`、校验审批绑定，并比对资源基线值；
+  发现外部改动或篡改即以 `conflict` 拒绝（写入任何备份/变更之前）。
+- **可驳回（reject）**——不想执行的 plan 可显式驳回，之后 `apply` 会被拒绝。
 - **应用前备份**——每次 apply 都会对资源及其原字段值做快照。
 - **全程审计**——只追加（append-only）的 JSONL 轨迹，每条事件都关联 `plan_id` / `approval_id` / `backup_id` / `request_id`。
 - **可回滚**——任何已应用的变更都能从其备份恢复。
@@ -46,7 +49,7 @@ zig build run -- version
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `NETBOX_URL` | `http://localhost:8000` | NetBox 基础 URL |
-| `NETBOX_TOKEN` | _（未设置）_ | API token；`get`/`inspect`/`apply`/`restore` 必需 |
+| `NETBOX_TOKEN` | _（未设置）_ | API token；`get`/`inspect`/`plan`/`apply`/`restore` 必需 |
 | `NBX_GUARD_STATE_DIR` | `.nbx-guard` | 本地状态目录 |
 | `NBX_GUARD_BRANCHING` | `0` | 将读写路由进某个 NetBox Branching 分支 |
 | `NBX_GUARD_BRANCH` | _（未设置）_ | 生效分支的 schema id（作为 `X-NetBox-Branch` 发送） |
@@ -75,6 +78,7 @@ nbx-guard get <type> <id>                  读取资源（只读）
 nbx-guard inspect <type> <id>              读取资源并标注字段策略
 nbx-guard plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
 nbx-guard approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
+nbx-guard reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）
 nbx-guard apply --plan <id>                先备份，再应用一个已审批/低风险的 plan
 nbx-guard restore --backup <id>            从备份快照回滚资源
 nbx-guard audit [--plan <id>]              显示审计日志

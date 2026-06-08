@@ -61,7 +61,7 @@
 | `backup_not_found` | 没有对应 id 的 backup。 |
 | `plan_state_error` | plan 状态不适合此操作。 |
 | `netbox_error` | NetBox 返回错误或不可达。 |
-| `conflict` | 资源在 plan 之下被改动了。 |
+| `conflict` | 资源在 plan 之后被外部改动（漂移），或 plan/审批的哈希校验不一致。 |
 | `io_error` | 本地状态读写失败。 |
 | `not_implemented` | 此构建中尚不可用的功能。 |
 
