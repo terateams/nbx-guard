@@ -1,0 +1,54 @@
+name: Acceptance
+
+# 针对真实 NetBox（容器）跑 nbx-guard 端到端验收。
+# 较重（需拉取 NetBox 镜像并执行数据库迁移），因此独立于快速 CI：
+# 仅在手动触发、每周定时，或改动 guard 逻辑/验收脚本时运行。
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1" # 每周一 03:00 UTC，检测 NetBox API 漂移
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - "acceptance/**"
+      - ".github/workflows/acceptance.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - "acceptance/**"
+      - ".github/workflows/acceptance.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  netbox-acceptance:
+    name: NetBox acceptance
+    runs-on: ubuntu-latest # 需要 Docker（macOS runner 没有 Docker）
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Show toolchain
+        run: |
+          zig version
+          docker version
+          docker compose version
+          jq --version
+
+      - name: Run NetBox acceptance
+        run: bash acceptance/run.sh
