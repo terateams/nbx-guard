@@ -16,7 +16,7 @@ const netbox = @import("netbox.zig");
 const doctor = @import("doctor.zig");
 const config = @import("config.zig");
 
-pub const version = "0.6.3";
+pub const version = "0.7.0";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
