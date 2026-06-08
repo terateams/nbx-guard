@@ -179,7 +179,7 @@ echo "================ 验收用例 ================"
 guard version
 check "version: 退出码 0" "$GRC" "0"
 check "version: ok=true" "$(j '.ok')" "true"
-check "version: 版本号" "$(j '.data.version')" "0.2.0"
+check "version: 版本号" "$(j '.data.version')" "0.3.0"
 check "version: token_configured=true" "$(j '.data.token_configured')" "true"
 
 # 2) help
@@ -202,6 +202,8 @@ guard describe
 check "describe(目录): ok=true" "$(j '.ok')" "true"
 check "describe(目录): 含 ip-address 类型" \
   "$(j '.data.resource_types | map(.resource_type) | index("ip-address") != null')" "true"
+check "describe(目录): 含 contact 类型" \
+  "$(j '.data.resource_types | map(.resource_type) | index("contact") != null')" "true"
 
 guard describe ip-address
 check "describe ip-address: ok=true" "$(j '.ok')" "true"
@@ -238,6 +240,27 @@ check "describe --source openapi: 无漂移字段" \
 guard describe vlan --source openapi
 check "describe --source openapi: 复用磁盘缓存 cached=true" \
   "$(j '.data.netbox_sync.cached')" "true"
+
+# 4d) describe contact（受治理类型 contact -> tenancy/contacts，校验字段与实时同步）
+guard describe contact
+check "describe contact: ok=true" "$(j '.ok')" "true"
+check "describe contact: endpoint=tenancy/contacts" "$(j '.data.netbox_endpoint')" "tenancy/contacts"
+check "describe contact: email 为低风险" \
+  "$(j '.data.fields[] | select(.name=="email") | .class')" "allowed"
+check "describe contact: groups 为高风险" \
+  "$(j '.data.fields[] | select(.name=="groups") | .class')" "high_risk"
+check "describe contact: 实时同步 status=ok" "$(j '.data.netbox_sync.status')" "ok"
+check "describe contact: email 已对齐 NetBox" \
+  "$(j '.data.fields[] | select(.name=="email") | .present_in_netbox')" "true"
+check "describe contact: 无漂移字段（含 groups M2M）" \
+  "$(j '.data.netbox_sync.missing_in_netbox | length')" "0"
+
+guard describe contact --source openapi
+check "describe contact --source openapi: 同步 status=ok" "$(j '.data.netbox_sync.status')" "ok"
+check "describe contact --source openapi: 解析出 component" \
+  "$(j '.data.netbox_sync.component != null')" "true"
+check "describe contact --source openapi: 无漂移字段" \
+  "$(j '.data.netbox_sync.missing_in_netbox | length')" "0"
 
 # 5) token 门禁：不带 token 的 get 应被拒
 guard_notoken get ip-address "$IP_ID"

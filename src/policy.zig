@@ -7,10 +7,10 @@ pub const FieldClass = enum { allowed, high_risk, denied };
 pub const Decision = enum { allow, allow_with_approval, deny };
 
 /// Low-risk, agent-writable fields (no approval required).
-pub const allowed_fields = [_][]const u8{ "description", "comments", "tags", "custom_fields" };
+pub const allowed_fields = [_][]const u8{ "description", "comments", "tags", "custom_fields", "title", "phone", "email", "link" };
 
 /// High-risk fields: writable only through an approved plan.
-pub const high_risk_fields = [_][]const u8{ "status", "role", "site", "rack", "prefix", "address" };
+pub const high_risk_fields = [_][]const u8{ "status", "role", "site", "rack", "prefix", "address", "groups" };
 
 /// Only `update` is permitted. `create`/`delete`/`bulk_delete` are refused.
 pub fn actionAllowed(action: []const u8) bool {

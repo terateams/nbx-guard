@@ -14,7 +14,7 @@ const backup = @import("backup.zig");
 const audit = @import("audit.zig");
 const netbox = @import("netbox.zig");
 
-pub const version = "0.2.0";
+pub const version = "0.3.0";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
@@ -110,7 +110,7 @@ fn printHelp(ctx: *Context) !void {
             "audit [--plan <id>]              Show the audit log",
             "list <plans|approvals|backups>   List local state",
         },
-        resource_types: []const []const u8 = &.{ "device", "interface", "ip-address", "prefix", "vlan" },
+        resource_types: []const []const u8 = &.{ "device", "interface", "ip-address", "prefix", "vlan", "contact" },
         allowed_fields: []const []const u8 = &policy.allowed_fields,
         high_risk_fields: []const []const u8 = &policy.high_risk_fields,
         env: []const []const u8 = &.{
@@ -1149,7 +1149,7 @@ fn failUnknownType(ctx: *Context, command: []const u8, rtype: []const u8) !u8 {
     try ctx.fail(command, .{
         .kind = .invalid_args,
         .message = "unknown resource type",
-        .next_action = "run `nbxg describe` to list types; one of: device, interface, ip-address, prefix, vlan",
+        .next_action = "run `nbxg describe` to list types; one of: device, interface, ip-address, prefix, vlan, contact",
     });
     return exit_client;
 }

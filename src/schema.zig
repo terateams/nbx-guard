@@ -46,6 +46,11 @@ pub const field_docs = [_]FieldDoc{
     .{ .name = "rack", .json_type = "reference", .example = "rack=3", .note = "Numeric id of a rack" },
     .{ .name = "prefix", .json_type = "string", .example = "prefix=10.0.0.0/24", .note = "CIDR notation" },
     .{ .name = "address", .json_type = "string", .example = "address=192.0.2.10/24", .note = "IP with mask, CIDR notation" },
+    .{ .name = "title", .json_type = "string", .example = "title=\"Network Engineer\"" },
+    .{ .name = "phone", .json_type = "string", .example = "phone=\"+1-555-0100\"" },
+    .{ .name = "email", .json_type = "string", .example = "email=netops@example.com" },
+    .{ .name = "link", .json_type = "string", .example = "link=https://wiki.example.com/netops", .note = "Absolute URL" },
+    .{ .name = "groups", .json_type = "array", .example = "groups='[3]'", .note = "JSON array of contact-group ids (M2M)" },
 };
 
 pub fn fieldDoc(name: []const u8) ?FieldDoc {
@@ -115,6 +120,19 @@ pub const resources = [_]ResourceDoc{
         .examples = &.{
             "nbxg plan vlan <id> --set description=\"dmz\"",
             "nbxg plan vlan <id> --set status=deprecated   # high-risk -> approve",
+        },
+    },
+    .{
+        .key = "contact",
+        .netbox_endpoint = "tenancy/contacts",
+        .display = "Contact",
+        .summary = "A point of contact (person or role) in Tenancy.",
+        .low = &.{ "description", "comments", "tags", "custom_fields", "title", "phone", "email", "link" },
+        .high = &.{"groups"},
+        .examples = &.{
+            "nbxg plan contact <id> --set phone=\"+1-555-0100\"",
+            "nbxg plan contact <id> --set email=netops@example.com",
+            "nbxg plan contact <id> --set groups='[3]'   # high-risk -> approve",
         },
     },
 };

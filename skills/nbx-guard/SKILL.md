@@ -1,9 +1,9 @@
 ---
 name: nbx-guard
 description: >-
-  通过 nbxg CLI 安全地读取与变更 NetBox（DCIM/IPAM）。当需要查看或修改 NetBox 中的
-  device / interface / ip-address / prefix / vlan（如改 description、status、role、
-  site、address 等字段），或需要受控的「计划→审批→应用→回滚」变更流程、字段级默认拒绝、
+  通过 nbxg CLI 安全地读取与变更 NetBox（DCIM/IPAM/Tenancy）。当需要查看或修改 NetBox 中的
+  device / interface / ip-address / prefix / vlan / contact（如改 description、status、role、
+  site、address、phone、email 等字段），或需要受控的「计划→审批→应用→回滚」变更流程、字段级默认拒绝、
   变更前备份与审计时使用本技能。Agent 只提出变更意图，由 nbxg 决定是否放行。
 ---
 
@@ -80,7 +80,7 @@ nbxg audit   [--plan <id>]            查看审计日志
 nbxg list    <plans|approvals|backups>  列出本地状态
 ```
 
-**支持的资源类型**：`device`、`interface`、`ip-address`、`prefix`、`vlan`。
+**支持的资源类型**：`device`、`interface`、`ip-address`、`prefix`、`vlan`、`contact`。
 
 ---
 
@@ -88,8 +88,8 @@ nbxg list    <plans|approvals|backups>  列出本地状态
 
 只有被策略显式收录的字段才能写入：
 
-- **低风险（直接放行，无需审批）**：`description`、`comments`、`tags`、`custom_fields`。
-- **高风险（必须经 `approve` 才能 apply）**：`status`、`role`、`site`、`rack`、`prefix`、`address`。
+- **低风险（直接放行，无需审批）**：`description`、`comments`、`tags`、`custom_fields`、`title`、`phone`、`email`、`link`。
+- **高风险（必须经 `approve` 才能 apply）**：`status`、`role`、`site`、`rack`、`prefix`、`address`、`groups`。
 - **其它一切字段**：拒绝（`error.kind = policy_denied`）。
 - **动作**：仅允许 `update`；`create`/`delete`/`bulk_delete` 一律拒绝。
 

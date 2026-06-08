@@ -96,11 +96,11 @@ API 完成——这些审批者级别的生命周期操作刻意不由 agent 网
 
 | 分类 | 字段 | 行为 |
 | --- | --- | --- |
-| 允许（低风险） | `description`、`comments`、`tags`、`custom_fields` | 直接应用 |
-| 高风险 | `status`、`role`、`site`、`rack`、`prefix`、`address` | 需要审批 |
+| 允许（低风险） | `description`、`comments`、`tags`、`custom_fields`、`title`、`phone`、`email`、`link` | 直接应用 |
+| 高风险 | `status`、`role`、`site`、`rack`、`prefix`、`address`、`groups` | 需要审批 |
 | 其它一切 | — | **拒绝** |
 
-支持的资源类型：`device`、`interface`、`ip-address`、`prefix`、`vlan`。
+支持的资源类型：`device`、`interface`、`ip-address`、`prefix`、`vlan`、`contact`。
 
 ## 命令
 

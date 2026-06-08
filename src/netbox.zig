@@ -22,6 +22,7 @@ pub fn endpoint(resource_type: []const u8) ?[]const u8 {
         .{ "ip-address", "ipam/ip-addresses" },
         .{ "prefix", "ipam/prefixes" },
         .{ "vlan", "ipam/vlans" },
+        .{ "contact", "tenancy/contacts" },
     };
     inline for (map) |m| {
         if (std.mem.eql(u8, resource_type, m[0])) return m[1];
@@ -194,6 +195,7 @@ fn timeoutFor(config: Config) std.Io.Timeout {
 test "endpoint mapping" {
     try std.testing.expectEqualStrings("dcim/devices", endpoint("device").?);
     try std.testing.expectEqualStrings("ipam/ip-addresses", endpoint("ip-address").?);
+    try std.testing.expectEqualStrings("tenancy/contacts", endpoint("contact").?);
     try std.testing.expect(endpoint("nope") == null);
 }
 
