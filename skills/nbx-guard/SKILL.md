@@ -60,6 +60,7 @@ bash scripts/installer.sh
 | `NBX_GUARD_EXTRA_RESOURCES` | 否 | — | **算子专用**：扩展受治理类型（`类型=端点`，逗号分隔，如 `site=dcim/sites`）。Agent 不应设置。 |
 | `NBX_GUARD_ALLOWED_FIELDS` | 否 | — | **算子专用**：追加低风险字段（逗号/空格分隔）。 |
 | `NBX_GUARD_HIGH_RISK_FIELDS` | 否 | — | **算子专用**：追加高风险字段（需审批）。 |
+| `NBX_GUARD_READ_SENSITIVE_FIELDS` | 否 | — | **算子专用**：追加读敏感字段（整对象读取需 `approve-read`）。Agent 不应设置。 |
 | `NBX_GUARD_CONFIG` | 否 | `~/.nbx-guard/config.json` | **算子专用**：治理扩展配置文件路径覆盖。 |
 
 > token 绝不会被写入状态目录，也绝不会在输出里打印。`nbxg version` 只报告 `token_configured: true|false`。
@@ -81,8 +82,8 @@ bash scripts/installer.sh
 nbxg version                          打印版本与当前生效配置（无需 token）
 nbxg help                             机器可读的帮助（命令/字段/环境变量）
 nbxg doctor [--skill <dir>]           自检：安装的二进制与 SKILL.md/源码是否一致（离线、无需 token）
-nbxg get <type> <id>                  读取资源（只读）
-nbxg inspect <type> <id>              读取资源并对每个字段标注策略类别
+nbxg get <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]  读取资源（basic 默认脱敏读敏感字段）
+nbxg inspect <type> <id> [--fields basic|all]  读取资源并标注读/写字段策略
 nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（默认 brief 只读）
 nbxg search <type> -q <text> [选项]   按 NetBox q 模糊搜索某类型的对象（发现 id）
 nbxg export <type> [选项]             只读导出/快照匹配资源（含来源元数据，供评审/审计/对比）
@@ -91,6 +92,7 @@ nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：列出可写字段 / 输入输出 schema，并实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险 + 漂移基线）
 nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
+nbxg approve-read --plan <id> [--note x]  审批一次敏感对象的整体读取（绑定 plan_hash）
 nbxg reject  --plan <id> [--note x]   驳回一个 plan（之后 apply 会被拒）
 nbxg apply   --plan <id>              先备份，再应用一个已审批/低风险 plan
 nbxg restore --backup <id>           从变更前备份回滚资源
@@ -173,7 +175,31 @@ nbxg plan vlan   10 --set custom_fields='{"x":1}'    # JSON 对象
 
 ---
 
-## 自描述（describe）—— Agent 先问再做
+## 读取策略（读取也分级，默认最小化）
+
+读取与写入**分开分级**。`get`/`inspect` 默认 `--fields basic`，把**读敏感字段**脱敏，避免把
+敏感数据整体倾倒进转录；要整对象读取须走读审批。
+
+- **读敏感字段**（`basic` 下脱敏，整对象读取需审批）：`phone`、`email`、`comments`、
+  `custom_fields`、`tenant`（人工算子可用 `NBX_GUARD_READ_SENSITIVE_FIELDS` 追加）。
+- `--fields basic`（**默认**）：返回对象，读敏感字段替换为 `[redacted: read approval required]`；
+  `data.read_policy.redacted_fields` 列出被脱敏字段。低风险、不触发审批。
+- `--fields all`：请求整对象。对象**不含**读敏感字段时直接返回；**含**读敏感字段时默认拒绝
+  （`error.kind = needs_approval`），需走读审批路径：
+
+```text
+nbxg get device 123                                 # basic：phone/email/comments… 被脱敏
+nbxg get device 123 --fields all                    # 含敏感字段 -> needs_approval
+nbxg get device 123 --fields all --plan-read        # 创建读 plan（rplan_…），返回脱敏预览
+nbxg approve-read --plan rplan_... --note "ok"       # 人工审批（绑定 plan_hash）
+nbxg get device 123 --fields all --plan rplan_...     # 披露整对象（写 read_served 审计）
+```
+
+> 读 plan 与写 plan 隔离：`approve`/`apply` 会拒绝读 plan（提示用 `approve-read`/`get --plan`），
+> `approve-read` 只接受读 plan。**Agent 不应自我审批**：在 `needs_approval` 处停下，请人类授权。
+> 默认优先用 `basic`，仅在确有必要披露敏感字段时才申请 `--fields all` 读审批。
+
+---
 
 `describe` 让 Agent 在动手前先了解「这个类型能做什么、输入输出长什么样」，并把字段元数据
 **实时对齐真实 NetBox**，避免凭空猜字段或用过期的取值。
@@ -303,7 +329,8 @@ nbxg list backups               # 已存储的备份
   且**在写入/备份之前**就拦截——不会产生半成品变更。
 - **变更前备份**：每次 `apply` 先抓取并存储完整快照与被改字段的原值，`restore` 据此回滚。
 - **原子写入 + 互斥锁**：状态文件原子落盘；写命令串行化，避免审计丢条目或重复 apply。
-- **审计链**：`audit.jsonl` 只追加，事件含 `plan_created/approved/rejected/applied/apply_failed/restored`。
+- **审计链**：`audit.jsonl` 只追加，事件含 `plan_created/approved/rejected/applied/apply_failed/restored`，
+  以及读取侧的 `read_plan_created/read_approved/read_served`（敏感字段的整体披露可追溯）。
 
 ---
 
