@@ -1,10 +1,10 @@
 ---
 name: nbx-guard
 description: >-
-  通过 nbxg CLI 安全地读取与变更 NetBox（DCIM/IPAM/Tenancy）。当需要查看或修改 NetBox 中的
+  通过 nbxg CLI 安全地读取、发现与变更 NetBox（DCIM/IPAM/Tenancy）。当需要查看、搜索或修改 NetBox 中的
   device / interface / ip-address / prefix / vlan / contact（如改 description、status、role、
-  site、address、phone、email 等字段），或需要受控的「计划→审批→应用→回滚」变更流程、字段级默认拒绝、
-  变更前备份与审计时使用本技能。Agent 只提出变更意图，由 nbxg 决定是否放行。
+  site、address、phone、email 等字段），或需要先发现资源 id（list-resources/search）、受控的
+  「计划→审批→应用→回滚」变更流程、字段级默认拒绝、变更前备份与审计时使用本技能。Agent 只提出变更意图，由 nbxg 决定是否放行。
 ---
 
 # nbx-guard（`nbxg`）——面向 Agent 的 NetBox 安全变更网关
@@ -57,8 +57,15 @@ bash scripts/installer.sh
 | `NBX_GUARD_HTTP_TIMEOUT_MS` | 否 | `15000` | NetBox 连接超时（毫秒）；`0` 关闭。 |
 | `NBX_GUARD_BRANCHING` | 否 | `0` | 设为 `1/true` 时把写入路由进 NetBox Branching 分支。 |
 | `NBX_GUARD_BRANCH` | 否 | — | 生效分支的 schema id（作为 `X-NetBox-Branch` 头发送）。 |
+| `NBX_GUARD_EXTRA_RESOURCES` | 否 | — | **算子专用**：扩展受治理类型（`类型=端点`，逗号分隔，如 `site=dcim/sites`）。Agent 不应设置。 |
+| `NBX_GUARD_ALLOWED_FIELDS` | 否 | — | **算子专用**：追加低风险字段（逗号/空格分隔）。 |
+| `NBX_GUARD_HIGH_RISK_FIELDS` | 否 | — | **算子专用**：追加高风险字段（需审批）。 |
 
 > token 绝不会被写入状态目录，也绝不会在输出里打印。`nbxg version` 只报告 `token_configured: true|false`。
+
+> `NBX_GUARD_EXTRA_RESOURCES` / `*_FIELDS` 由**人工运维方**控制，用于在默认拒绝之外显式放行更多
+> 类型/字段；**Agent 不要自行设置这些变量**。默认拒绝、内置高风险分类与全部工作流控制（plan/审批/
+> 备份/漂移/审计/还原）始终不变。遇到「类型/字段不在治理范围」时，应**提示人工算子**去配置，而不是绕过。
 
 ---
 
@@ -69,6 +76,8 @@ nbxg version                          打印版本与当前生效配置（无需
 nbxg help                             机器可读的帮助（命令/字段/环境变量）
 nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并对每个字段标注策略类别
+nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（默认 brief 只读）
+nbxg search <type> -q <text> [选项]   按 NetBox q 模糊搜索某类型的对象（发现 id）
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：列出可写字段 / 输入输出 schema，并实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险 + 漂移基线）
@@ -81,6 +90,30 @@ nbxg list    <plans|approvals|backups>  列出本地状态
 ```
 
 **支持的资源类型**：`device`、`interface`、`ip-address`、`prefix`、`vlan`、`contact`。
+人工算子可通过 `NBX_GUARD_EXTRA_RESOURCES` 扩展更多类型（见上）。
+
+---
+
+## 资源发现（先找 id，再操作）
+
+`get`/`inspect`/`plan` 都需要 `<id>`。当你只知道名称/描述、不知道 id 时，先用发现命令（**只读、
+不触发审批**）：
+
+- `nbxg list-resources <type> [--limit n] [--offset n] [--filter k=v ...] [--all-fields]`
+  列出对象。默认 `brief`（仅 `id`/`display`/`name`/`description` 等标识字段，低风险）。响应给出
+  `count`（总数）/`returned`（本页）/`has_more`（是否还有下一页）。
+- `nbxg search <type> -q <text>`：用 NetBox 通用 `q` 参数模糊搜索；`--query` / `--name` 是 `-q`
+  的别名（即便类型没有 `name` 字段也可用）。
+
+```text
+nbxg search contact -q alice                 # 按文本找联系人，拿到 id
+nbxg list-resources ip-address --filter status=active --limit 20
+nbxg get contact 3                           # 用上一步发现的 id 读取
+```
+
+**Agent 用法**：需要对「某个名字/描述」的对象动手时，先 `search`/`list-resources` 拿到 `id`，
+再 `describe <type>` 确认可写字段，最后 `plan → apply`。除非确有需要，避免 `--all-fields`
+（返回面更大），优先用默认 `brief`。
 
 ---
 
@@ -180,9 +213,10 @@ nbxg describe device --offline         # 仅静态 schema
 
 ## 标准工作流
 
-### 0) 先自描述（推荐）
+### 0) 发现 + 自描述（推荐）
 
 ```sh
+nbxg search ip-address -q 192.0.2          # 不知道 id 时先发现，拿到 data.results[].id
 nbxg describe ip-address --source openapi
 #  -> data.fields[].name/json_type/class、data.netbox_sync.status:"ok"
 #     按返回的字段与 choices/enum 组织下面的 --set，减少 policy_denied / 校验失败
@@ -246,6 +280,7 @@ nbxg list backups               # 已存储的备份
 3. 遇 `conflict`（漂移）：重新 `get`/`inspect` 看现状，再决定是否重新 `plan`。
 4. 高风险变更在 `approve` 前停下，向人类申请审批。
 5. `apply` 后用 `get`/`inspect` 核对结果符合预期。
+6. 不知道 `id` 时先 `search`/`list-resources` 发现，不要凭空猜测 id。
 
 **不要**：
 
@@ -253,6 +288,9 @@ nbxg list backups               # 已存储的备份
 2. 不要对 `policy_denied` 的字段反复重试——那是设计上的默认拒绝。
 3. 不要在未经授权时自行 `approve` 高风险计划。
 4. 不要忽略退出码 `2/3` 当作成功。
+5. 不要自行设置 `NBX_GUARD_EXTRA_RESOURCES` / `NBX_GUARD_ALLOWED_FIELDS` /
+   `NBX_GUARD_HIGH_RISK_FIELDS` 来绕过默认拒绝——这些是人工算子的职责。遇到类型/字段不在
+   治理范围（`invalid_args` 未知类型、或 `policy_denied`），应**请人工算子去配置**。
 
 ---
 

@@ -157,6 +157,18 @@ guard_notoken() {
   GRC=$?
   set -e
 }
+# 算子扩展运行：通过 NBX_GUARD_EXTRA_RESOURCES / *_FIELDS 让人工算子在默认拒绝之外
+# 显式放行更多受治理类型与字段（site/tenant + facility/tenant 字段）。
+guard_ext() {
+  set +e
+  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
+    NBX_GUARD_EXTRA_RESOURCES="site=dcim/sites,tenant=tenancy/tenants" \
+    NBX_GUARD_ALLOWED_FIELDS="facility" \
+    NBX_GUARD_HIGH_RISK_FIELDS="tenant" \
+    "$GUARD" "$@" 2>/dev/null)
+  GRC=$?
+  set -e
+}
 j() { printf '%s' "$GOUT" | jq -r "$1"; }
 # 直接查 NetBox（校验副作用）
 nb_field() { curl -fsS -H "$NB_AUTH" "$BASE/api/ipam/ip-addresses/$IP_ID/" | jq -r "$1"; }
@@ -179,7 +191,7 @@ echo "================ 验收用例 ================"
 guard version
 check "version: 退出码 0" "$GRC" "0"
 check "version: ok=true" "$(j '.ok')" "true"
-check "version: 版本号" "$(j '.data.version')" "0.3.0"
+check "version: 版本号" "$(j '.data.version')" "0.4.0"
 check "version: token_configured=true" "$(j '.data.token_configured')" "true"
 
 # 2) help
@@ -261,6 +273,88 @@ check "describe contact --source openapi: 解析出 component" \
   "$(j '.data.netbox_sync.component != null')" "true"
 check "describe contact --source openapi: 无漂移字段" \
   "$(j '.data.netbox_sync.missing_in_netbox | length')" "0"
+
+# 4e) list-resources / search（资源发现：Agent 先发现 id，再做 id 级操作）
+IP2_ID=$(curl -fsS -X POST "$BASE/api/ipam/ip-addresses/" \
+  -H "$NB_AUTH" -H "Content-Type: application/json" \
+  -d '{"address":"192.0.2.20/24","status":"active","description":"discovery-target"}' | jq -r '.id')
+
+guard list-resources ip-address --limit 50
+check "list-resources: ok=true" "$(j '.ok')" "true"
+check "list-resources: endpoint=ipam/ip-addresses" "$(j '.data.netbox_endpoint')" "ipam/ip-addresses"
+check "list-resources: 默认 brief=true" "$(j '.data.query.brief')" "true"
+check "list-resources: count>=2" "$(j 'if .data.count >= 2 then "yes" else "no" end')" "yes"
+check "list-resources: brief 仅含标识字段（无 dns_name）" \
+  "$(j '.data.results[0] | has("dns_name")')" "false"
+
+guard search ip-address -q discovery-target
+check "search: ok=true" "$(j '.ok')" "true"
+check "search: query.text=discovery-target" "$(j '.data.query.text')" "discovery-target"
+check "search: 命中刚建的 ip" "$(j "[.data.results[] | select(.id==$IP2_ID)] | length")" "1"
+
+guard search ip-address --name discovery-target
+check "search --name 别名映射到 q(text)" "$(j '.data.query.text')" "discovery-target"
+
+guard list-resources ip-address --all-fields --limit 1
+check "list-resources --all-fields: brief=false" "$(j '.data.query.brief')" "false"
+check "list-resources --all-fields: 含完整字段 dns_name" "$(j '.data.results[0] | has("dns_name")')" "true"
+
+guard list-resources nope
+check "list-resources(未知类型): 退出码 2" "$GRC" "2"
+check "list-resources(未知类型): invalid_args" "$(j '.error.kind')" "invalid_args"
+
+# 4f) 算子扩展受治理类型/字段（NBX_GUARD_EXTRA_RESOURCES / *_FIELDS，人工算子显式放行；
+#     默认拒绝与全部工作流控制不变，Agent 自身无法扩展）
+SITE_ID=$(curl -fsS -X POST "$BASE/api/dcim/sites/" \
+  -H "$NB_AUTH" -H "Content-Type: application/json" \
+  -d '{"name":"Acceptance HQ","slug":"acc-hq","status":"active"}' | jq -r '.id')
+
+# 未配置扩展时 site 属未知类型 —— 类型级默认拒绝仍生效
+guard get site "$SITE_ID"
+check "未扩展 get site: 退出码 2" "$GRC" "2"
+check "未扩展 get site: invalid_args（默认拒绝）" "$(j '.error.kind')" "invalid_args"
+
+# 配置扩展后可只读
+guard_ext get site "$SITE_ID"
+check "扩展后 get site: ok=true" "$(j '.ok')" "true"
+check "扩展后 get site: 名称正确" "$(j '.data.resource.name')" "Acceptance HQ"
+
+# describe 目录纳入扩展类型
+guard_ext describe --offline
+check "describe(目录): 含算子扩展类型 site" \
+  "$(j '.data.resource_types | map(.resource_type) | index("site") != null')" "true"
+
+# describe site：合成文档 + 实时 OPTIONS 同步
+guard_ext describe site --source options
+check "describe site(扩展): endpoint=dcim/sites" "$(j '.data.netbox_endpoint')" "dcim/sites"
+check "describe site(扩展): 实时同步 status=ok" "$(j '.data.netbox_sync.status')" "ok"
+check "describe site(扩展): facility 实时存在" \
+  "$(j '.data.fields[] | select(.name=="facility") | .present_in_netbox')" "true"
+check "describe site(扩展): 无漂移字段" "$(j '.data.netbox_sync.missing_in_netbox | length')" "0"
+
+# 发现扩展类型
+guard_ext list-resources site
+check "list-resources site(扩展): ok=true" "$(j '.ok')" "true"
+check "list-resources site(扩展): count>=1" "$(j 'if .data.count >= 1 then "yes" else "no" end')" "yes"
+
+# 写路径：算子放行的低风险字段 facility 走 plan->apply（仍经计划/备份/审计）
+guard_ext plan site "$SITE_ID" --set facility="Bldg A"
+check "plan site facility(扩展低风险): ok=true" "$(j '.ok')" "true"
+check "plan site facility: requires_approval=false" "$(j '.data.plan.requires_approval')" "false"
+SITE_PLAN=$(j '.data.plan.plan_id')
+guard_ext apply --plan "$SITE_PLAN"
+check "apply site facility(扩展): status=applied" "$(j '.data.status')" "applied"
+check "apply site facility: NetBox 侧实写" \
+  "$(curl -fsS -H "$NB_AUTH" "$BASE/api/dcim/sites/$SITE_ID/" | jq -r '.facility')" "Bldg A"
+
+# 算子高风险字段 tenant —— 需审批
+guard_ext plan site "$SITE_ID" --set tenant=1
+check "plan site tenant(扩展高风险): requires_approval=true" "$(j '.data.plan.requires_approval')" "true"
+
+# 默认拒绝不可被削弱：身份字段 name 即使在扩展类型上仍被拒
+guard_ext plan site "$SITE_ID" --set name=renamed
+check "plan site name(扩展类型仍拒绝): 退出码 2" "$GRC" "2"
+check "plan site name: policy_denied" "$(j '.error.kind')" "policy_denied"
 
 # 5) token 门禁：不带 token 的 get 应被拒
 guard_notoken get ip-address "$IP_ID"

@@ -82,6 +82,9 @@ bash scripts/installer.sh
 | `NBX_GUARD_HTTP_TIMEOUT_MS` | `15000` | NetBox 请求连接超时（毫秒）；`0` 关闭 |
 | `NBX_GUARD_BRANCHING` | `0` | 将读写路由进某个 NetBox Branching 分支 |
 | `NBX_GUARD_BRANCH` | _（未设置）_ | 生效分支的 schema id（作为 `X-NetBox-Branch` 发送） |
+| `NBX_GUARD_EXTRA_RESOURCES` | _（未设置）_ | **算子**扩展受治理类型（`类型=端点` 列表，如 `site=dcim/sites`） |
+| `NBX_GUARD_ALLOWED_FIELDS` | _（未设置）_ | **算子**追加的低风险字段（逗号/空格分隔） |
+| `NBX_GUARD_HIGH_RISK_FIELDS` | _（未设置）_ | **算子**追加的高风险字段（需审批） |
 
 `NETBOX_TOKEN` 同时支持 NetBox v1 与 v2 token：以 `nbt_` 开头的 v2 token（NetBox 4.5+
 默认）自动以 `Bearer` 方案鉴权，其余按 v1 `Token` 方案发送——把 NetBox 给你的 token
@@ -102,6 +105,11 @@ API 完成——这些审批者级别的生命周期操作刻意不由 agent 网
 
 支持的资源类型：`device`、`interface`、`ip-address`、`prefix`、`vlan`、`contact`。
 
+> **算子可扩展**：以上是内置的安全下限。人工运维方（非 agent）可用 `NBX_GUARD_EXTRA_RESOURCES`
+> 增加受治理类型、用 `NBX_GUARD_ALLOWED_FIELDS` / `NBX_GUARD_HIGH_RISK_FIELDS` 增加字段，
+> 而默认拒绝与全部工作流控制（plan/审批/备份/漂移/审计/还原）保持不变，agent 自身无法扩展。
+> 详见[策略文档](docs/src/policy.md)。
+
 ## 命令
 
 ```
@@ -109,6 +117,8 @@ nbxg version                          打印版本与当前生效配置
 nbxg help                             显示帮助
 nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并标注字段策略
+nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（brief 只读）
+nbxg search <type> -q <text> [选项]   按 NetBox q 模糊搜索某类型的对象
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：可写字段 / 输入输出 schema，实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）

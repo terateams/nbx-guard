@@ -14,7 +14,7 @@ const backup = @import("backup.zig");
 const audit = @import("audit.zig");
 const netbox = @import("netbox.zig");
 
-pub const version = "0.3.0";
+pub const version = "0.4.0";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
@@ -55,6 +55,10 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
         return cmdAudit(ctx, rest);
     } else if (eq(cmd, "list")) {
         return cmdList(ctx, rest);
+    } else if (eq(cmd, "list-resources")) {
+        return cmdListResources(ctx, rest, false);
+    } else if (eq(cmd, "search")) {
+        return cmdListResources(ctx, rest, true);
     }
 
     try ctx.fail(cmd, .{
@@ -100,6 +104,10 @@ fn printHelp(ctx: *Context) !void {
             "help                             Show this help",
             "get <type> <id>                  Read a NetBox resource (read-only)",
             "inspect <type> <id>              Read a resource annotated with field policy",
+            "list-resources <type> [--limit N] [--offset N] [--all-fields]",
+            "                                 Discover NetBox resources (brief identifying fields; low-risk read)",
+            "search <type> [-q text] [--filter k=v] [--limit N] [--all-fields]",
+            "                                 Search NetBox resources by fuzzy text / field filters (read-only)",
             "describe [<type>] [--source options|openapi] [--refresh] [--offline]",
             "                                 Self-describe a type: action, fields, I/O schema (live-synced to NetBox)",
             "plan <type> <id> --set k=v ...   Create a change plan (policy + risk checked)",
@@ -119,6 +127,10 @@ fn printHelp(ctx: *Context) !void {
             "NBX_GUARD_STATE_DIR   Local state directory (default .nbx-guard)",
             "NBX_GUARD_HTTP_TIMEOUT_MS  NetBox connect timeout in ms (default 15000, 0=off)",
             "NBX_GUARD_BRANCHING   Use NetBox Branching (1/true)",
+            "NBX_GUARD_BRANCH      Active branch schema id when branching is enabled",
+            "NBX_GUARD_EXTRA_RESOURCES  Operator-added types, e.g. site=dcim/sites,tenant=tenancy/tenants",
+            "NBX_GUARD_ALLOWED_FIELDS   Extra low-risk writable fields (comma/space separated)",
+            "NBX_GUARD_HIGH_RISK_FIELDS Extra approval-gated writable fields (comma/space separated)",
         },
         principle: []const u8 = "Agent proposes intent; the CLI decides what is allowed.",
     };
@@ -141,7 +153,7 @@ fn cmdGet(ctx: *Context, rest: []const [:0]const u8, comptime command: []const u
     const rtype = rest[0];
     const rid = rest[1];
 
-    if (netbox.endpoint(rtype) == null) return failUnknownType(ctx, command, rtype);
+    if (netbox.endpointFor(ctx.env, rtype) == null) return failUnknownType(ctx, command, rtype);
     if (ctx.config.netbox_token == null) return failNoToken(ctx, command);
 
     var client = netbox.Client.init(ctx);
@@ -226,11 +238,11 @@ fn cmdDescribe(ctx: *Context, rest: []const [:0]const u8) !u8 {
     if (rtype == null) return describeCatalog(ctx);
 
     const key = rtype.?;
-    const doc = schema.lookup(key) orelse return failUnknownType(ctx, "describe", key);
+    const doc = schema.lookup(key) orelse (try syntheticDoc(ctx, key)) orelse return failUnknownType(ctx, "describe", key);
 
     var fields: std.ArrayList(DescribeField) = .empty;
     for (doc.low) |fname| {
-        const fd = schema.fieldDoc(fname) orelse continue;
+        const fd = schema.fieldDoc(fname) orelse genericFieldDoc(ctx, fname);
         try fields.append(ctx.arena, .{
             .name = fname,
             .class = "allowed",
@@ -241,7 +253,7 @@ fn cmdDescribe(ctx: *Context, rest: []const [:0]const u8) !u8 {
         });
     }
     for (doc.high) |fname| {
-        const fd = schema.fieldDoc(fname) orelse continue;
+        const fd = schema.fieldDoc(fname) orelse genericFieldDoc(ctx, fname);
         try fields.append(ctx.arena, .{
             .name = fname,
             .class = "high_risk",
@@ -395,6 +407,20 @@ fn describeCatalog(ctx: *Context) !u8 {
             .high_fields = r.high,
         });
     }
+    // Operator-extended types (NBX_GUARD_EXTRA_RESOURCES) appear alongside the
+    // built-ins so agents can discover the full governed surface.
+    for (try envExtraResources(ctx)) |ex| {
+        if (try syntheticDoc(ctx, ex.key)) |d| {
+            try items.append(ctx.arena, .{
+                .resource_type = d.key,
+                .netbox_endpoint = d.netbox_endpoint,
+                .display = d.display,
+                .summary = d.summary,
+                .low_fields = d.low,
+                .high_fields = d.high,
+            });
+        }
+    }
     try ctx.ok("describe", .{
         .principle = "Agent proposes intent; the CLI decides what is allowed.",
         .action = "update",
@@ -545,7 +571,7 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
     }
     const rtype = rest[0];
     const rid = rest[1];
-    if (netbox.endpoint(rtype) == null) return failUnknownType(ctx, "plan", rtype);
+    if (netbox.endpointFor(ctx.env, rtype) == null) return failUnknownType(ctx, "plan", rtype);
 
     const changes = try parseSet(ctx.arena, rest[2..]);
     if (changes.len == 0) {
@@ -559,7 +585,7 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     const changes_value = try plan.buildChanges(ctx.arena, changes);
     const fields = try plan.changeFields(ctx.arena, changes_value);
-    const eval = try policy.evaluate(ctx.arena, fields);
+    const eval = try policy.evaluateEnv(ctx.arena, ctx.env, fields);
 
     if (eval.decision == .deny) {
         try ctx.fail("plan", .{
@@ -827,7 +853,7 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     // Re-validate policy on the stored changes (defense in depth).
     const fields = try plan.changeFields(ctx.arena, p.changes);
-    const eval = try policy.evaluate(ctx.arena, fields);
+    const eval = try policy.evaluateEnv(ctx.arena, ctx.env, fields);
     if (eval.decision == .deny) {
         try ctx.fail("apply", .{
             .kind = .policy_denied,
@@ -1077,6 +1103,257 @@ fn cmdList(ctx: *Context, rest: []const [:0]const u8) !u8 {
 }
 
 // ---------------------------------------------------------------------------
+// list-resources / search (read-only NetBox discovery)
+// ---------------------------------------------------------------------------
+
+/// Discover NetBox resources before id-based operations. Default output is the
+/// NetBox `brief` representation (id/display/url + a couple of identifying
+/// fields) so the read surface stays minimal and low-risk; `--all-fields`
+/// returns full objects. `search` additionally accepts `-q/--name <text>`
+/// (NetBox fuzzy search) and repeatable `--filter key=value`.
+fn cmdListResources(ctx: *Context, rest: []const [:0]const u8, is_search: bool) !u8 {
+    const command = if (is_search) "search" else "list-resources";
+
+    var rtype: ?[]const u8 = null;
+    var limit: u32 = 50;
+    var offset: u32 = 0;
+    var all_fields = false;
+    var query_text: ?[]const u8 = null;
+    var filters: std.ArrayList([]const u8) = .empty;
+
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (eq(a, "--all-fields")) {
+            all_fields = true;
+        } else if (eq(a, "--limit")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                limit = parseU32(rest[i]) orelse return failIntFlag(ctx, command, "--limit");
+            }
+        } else if (std.mem.startsWith(u8, a, "--limit=")) {
+            limit = parseU32(a["--limit=".len..]) orelse return failIntFlag(ctx, command, "--limit");
+        } else if (eq(a, "--offset")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                offset = parseU32(rest[i]) orelse return failIntFlag(ctx, command, "--offset");
+            }
+        } else if (std.mem.startsWith(u8, a, "--offset=")) {
+            offset = parseU32(a["--offset=".len..]) orelse return failIntFlag(ctx, command, "--offset");
+        } else if (is_search and (eq(a, "-q") or eq(a, "--query") or eq(a, "--name"))) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                query_text = rest[i];
+            }
+        } else if (is_search and std.mem.startsWith(u8, a, "--query=")) {
+            query_text = a["--query=".len..];
+        } else if (is_search and std.mem.startsWith(u8, a, "--name=")) {
+            query_text = a["--name=".len..];
+        } else if (is_search and eq(a, "--filter")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                try filters.append(ctx.arena, rest[i]);
+            }
+        } else if (is_search and std.mem.startsWith(u8, a, "--filter=")) {
+            try filters.append(ctx.arena, a["--filter=".len..]);
+        } else if (!std.mem.startsWith(u8, a, "-") and rtype == null) {
+            rtype = a;
+        }
+    }
+
+    const rt = rtype orelse {
+        try ctx.fail(command, .{
+            .kind = .invalid_args,
+            .message = "expected <type>",
+            .next_action = if (is_search) "example: nbxg search device -q edge" else "example: nbxg list-resources device --limit 50",
+        });
+        return exit_client;
+    };
+
+    const ep = netbox.endpointFor(ctx.env, rt) orelse return failUnknownType(ctx, command, rt);
+    if (ctx.config.netbox_token == null) return failNoToken(ctx, command);
+
+    if (limit == 0) limit = 50;
+    if (limit > 1000) limit = 1000;
+
+    var qs: std.ArrayList(u8) = .empty;
+    try appendU32Param(ctx.arena, &qs, "limit", limit);
+    try appendU32Param(ctx.arena, &qs, "offset", offset);
+    if (!all_fields) try appendParam(ctx.arena, &qs, "brief", "true");
+    if (query_text) |q| try appendParam(ctx.arena, &qs, "q", q);
+    for (filters.items) |f| {
+        const eqi = std.mem.indexOfScalar(u8, f, '=') orelse continue;
+        try appendParam(ctx.arena, &qs, f[0..eqi], f[eqi + 1 ..]);
+    }
+
+    var client = netbox.Client.init(ctx);
+    defer client.deinit();
+    const res = client.list(rt, qs.items) catch |err| return failNetboxConn(ctx, command, err);
+    defer ctx.gpa.free(res.body);
+    if (!res.ok) return failNetboxStatus(ctx, command, res);
+
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, res.body, .{}) catch
+        std.json.Value{ .null = {} };
+    var total: i64 = 0;
+    var results: []const std.json.Value = &.{};
+    switch (parsed) {
+        .object => |o| {
+            if (o.get("count")) |c| switch (c) {
+                .integer => |n| total = n,
+                else => {},
+            };
+            if (o.get("results")) |r| switch (r) {
+                .array => |arr| results = arr.items,
+                else => {},
+            };
+        },
+        else => {},
+    }
+
+    const returned: i64 = @intCast(results.len);
+    const has_more = (@as(i64, @intCast(offset)) + returned) < total;
+
+    try ctx.ok(command, .{
+        .resource_type = rt,
+        .netbox_endpoint = ep,
+        .query = .{
+            .text = query_text,
+            .filters = filters.items,
+            .limit = limit,
+            .offset = offset,
+            .brief = !all_fields,
+        },
+        .count = total,
+        .returned = returned,
+        .has_more = has_more,
+        .results = results,
+        .note = if (all_fields)
+            "full-attribute listing (wider read surface); omit --all-fields for a minimal, low-risk view"
+        else
+            "brief listing: identifying fields only (id/display/url). Use --all-fields for full attributes, or get/inspect <type> <id> for one object.",
+        .next_action = if (has_more)
+            "more results exist; re-run with a larger --offset to page through them"
+        else
+            "use get / inspect / plan <type> <id> on a chosen id",
+    });
+    return exit_ok;
+}
+
+fn parseU32(s: []const u8) ?u32 {
+    return std.fmt.parseInt(u32, s, 10) catch null;
+}
+
+fn failIntFlag(ctx: *Context, command: []const u8, flag: []const u8) !u8 {
+    const msg = std.fmt.allocPrint(ctx.arena, "{s} expects a non-negative integer", .{flag}) catch
+        "flag expects a non-negative integer";
+    try ctx.fail(command, .{
+        .kind = .invalid_args,
+        .message = msg,
+        .next_action = "example: nbxg list-resources device --limit 50 --offset 0",
+    });
+    return exit_client;
+}
+
+/// Append `key=value` (both percent-encoded) to a query string, inserting `&`.
+fn appendParam(arena: std.mem.Allocator, qs: *std.ArrayList(u8), key: []const u8, value: []const u8) !void {
+    if (qs.items.len > 0) try qs.append(arena, '&');
+    try pctEncode(arena, qs, key);
+    try qs.append(arena, '=');
+    try pctEncode(arena, qs, value);
+}
+
+fn appendU32Param(arena: std.mem.Allocator, qs: *std.ArrayList(u8), key: []const u8, value: u32) !void {
+    var buf: [16]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{d}", .{value}) catch return;
+    try appendParam(arena, qs, key, s);
+}
+
+fn pctEncode(arena: std.mem.Allocator, out: *std.ArrayList(u8), raw: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (raw) |c| {
+        const unreserved = (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or
+            (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~';
+        if (unreserved) {
+            try out.append(arena, c);
+        } else {
+            try out.append(arena, '%');
+            try out.append(arena, hex[c >> 4]);
+            try out.append(arena, hex[c & 0x0F]);
+        }
+    }
+}
+
+const ExtraResource = struct { key: []const u8, endpoint: []const u8 };
+
+/// Operator-added resource types parsed from `NBX_GUARD_EXTRA_RESOURCES`
+/// (skipping any that shadow a built-in type).
+fn envExtraResources(ctx: *Context) ![]ExtraResource {
+    var list: std.ArrayList(ExtraResource) = .empty;
+    const spec = ctx.env.get("NBX_GUARD_EXTRA_RESOURCES") orelse return list.items;
+    var it = std.mem.tokenizeScalar(u8, spec, ',');
+    while (it.next()) |pair_raw| {
+        const pair = std.mem.trim(u8, pair_raw, " \t");
+        const eqi = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        const key = std.mem.trim(u8, pair[0..eqi], " \t");
+        const epath = std.mem.trim(u8, pair[eqi + 1 ..], " \t/");
+        if (key.len == 0 or epath.len == 0) continue;
+        if (netbox.endpoint(key) != null) continue;
+        try list.append(ctx.arena, .{ .key = key, .endpoint = epath });
+    }
+    return list.toOwnedSlice(ctx.arena);
+}
+
+/// Parse a comma/space separated env field list into a slice.
+fn envFieldList(ctx: *Context, var_name: []const u8) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    const spec = ctx.env.get(var_name) orelse return list.items;
+    var it = std.mem.tokenizeAny(u8, spec, ", \t");
+    while (it.next()) |tok| try list.append(ctx.arena, tok);
+    return list.toOwnedSlice(ctx.arena);
+}
+
+/// Build a minimal ResourceDoc for an operator-extended type so `describe` can
+/// self-document it. Governed fields = universal low-risk defaults + operator
+/// env field lists; the real schema is filled in by the live NetBox sync.
+fn syntheticDoc(ctx: *Context, key: []const u8) !?schema.ResourceDoc {
+    const ep = netbox.extraEndpoint(ctx.env, key) orelse return null;
+    const base_low = [_][]const u8{ "description", "comments", "tags", "custom_fields" };
+    const env_low = try envFieldList(ctx, "NBX_GUARD_ALLOWED_FIELDS");
+    const env_high = try envFieldList(ctx, "NBX_GUARD_HIGH_RISK_FIELDS");
+    var low: std.ArrayList([]const u8) = .empty;
+    try low.appendSlice(ctx.arena, &base_low);
+    for (env_low) |f| {
+        if (inList(&base_low, f)) continue;
+        try low.append(ctx.arena, f);
+    }
+    return schema.ResourceDoc{
+        .key = key,
+        .netbox_endpoint = ep,
+        .display = key,
+        .summary = "Operator-extended resource type (NBX_GUARD_EXTRA_RESOURCES); governed by global field policy.",
+        .low = try low.toOwnedSlice(ctx.arena),
+        .high = env_high,
+        .examples = &.{},
+    };
+}
+
+fn inList(list: []const []const u8, name: []const u8) bool {
+    for (list) |x| if (eq(x, name)) return true;
+    return false;
+}
+
+/// Fallback field doc for operator-extended fields that have no built-in entry.
+fn genericFieldDoc(ctx: *Context, name: []const u8) schema.FieldDoc {
+    const ex = std.fmt.allocPrint(ctx.arena, "{s}=<value>", .{name}) catch name;
+    return .{
+        .name = name,
+        .json_type = "string",
+        .example = ex,
+        .note = "operator-extended; consult the live NetBox schema below for the real type",
+    };
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
@@ -1149,7 +1426,7 @@ fn failUnknownType(ctx: *Context, command: []const u8, rtype: []const u8) !u8 {
     try ctx.fail(command, .{
         .kind = .invalid_args,
         .message = "unknown resource type",
-        .next_action = "run `nbxg describe` to list types; one of: device, interface, ip-address, prefix, vlan, contact",
+        .next_action = "run `nbxg describe` to list types (device, interface, ip-address, prefix, vlan, contact); an operator can add more via NBX_GUARD_EXTRA_RESOURCES",
     });
     return exit_client;
 }

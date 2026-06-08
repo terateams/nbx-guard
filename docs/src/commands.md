@@ -38,6 +38,47 @@ nbxg list <plans|approvals|backups>   列出本地状态
 与 `get` 类似，但在响应中标注字段策略（`allowed_fields`、`high_risk_fields`），让 agent
 能看到自己可以提议哪些字段。需要 token。
 
+## `list-resources <type> [选项]`
+
+**资源发现**：在做 id 级操作（`get`/`plan`）之前，先**列出**某类型的对象，拿到它们的
+`id`。只读，需要 token。
+
+默认返回 NetBox 的 `brief` 视图（仅 `id`/`url`/`display`/`name`/`description` 等标识字段），
+属低风险读取。响应在 `data` 下给出：
+
+- `count`：NetBox 侧匹配总数；`returned`：本页条数；`has_more`：是否还有下一页。
+- `results`：对象数组；`query`：本次实际使用的 `limit`/`offset`/`brief`/`filters`。
+
+| 选项 | 含义 |
+|---|---|
+| `--limit <n>` | 本页条数（默认 50，范围 1–1000） |
+| `--offset <n>` | 起始偏移，用于翻页 |
+| `--all-fields` | 关闭 `brief`，返回完整对象（字段更多，谨慎用于大列表） |
+| `--filter key=value` | 透传任意 NetBox 过滤器，可重复（如 `--filter status=active`） |
+
+```sh
+nbxg list-resources ip-address --limit 20
+nbxg list-resources device --filter site=hq --filter status=active
+nbxg list-resources contact --all-fields --offset 50
+```
+
+## `search <type> [选项]`
+
+`list-resources` 的「模糊搜索」变体：用 NetBox 通用 `q` 参数按文本检索。其余选项与
+`list-resources` 完全一致。
+
+- `-q` / `--query <text>` / `--name <text>`：三者均映射到 NetBox 的 `q`（即便某类型没有
+  `name` 字段，`--name` 也可用）。
+
+```sh
+nbxg search contact -q alice         # 按文本模糊搜索联系人
+nbxg search ip-address --name 192.0.2 # --name 也走 q
+nbxg search device -q core --filter status=active
+```
+
+> 读取（`get`/`inspect`/`list-resources`/`search`）不触发审批；写入仍必须 `plan`。
+> 先用 `search`/`list-resources` 发现 `id`，再对该 `id` 走 `plan → apply`。
+
 ## `describe [<type>] [--source options|openapi] [--refresh] [--offline]`
 
 **自描述**：让 agent 在动手前了解「某类型能改什么、输入输出 schema 是什么」，并把字段元数据

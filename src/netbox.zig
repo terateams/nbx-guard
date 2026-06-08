@@ -14,7 +14,7 @@ pub const Result = struct {
     ok: bool,
 };
 
-/// Map an MVP resource type to its NetBox API path.
+/// Map a built-in resource type to its NetBox API path.
 pub fn endpoint(resource_type: []const u8) ?[]const u8 {
     const map = .{
         .{ "device", "dcim/devices" },
@@ -26,6 +26,33 @@ pub fn endpoint(resource_type: []const u8) ?[]const u8 {
     };
     inline for (map) |m| {
         if (std.mem.eql(u8, resource_type, m[0])) return m[1];
+    }
+    return null;
+}
+
+/// Resolve a resource type to its NetBox API path, consulting the built-in map
+/// first and then operator-supplied extensions in `NBX_GUARD_EXTRA_RESOURCES`.
+/// This is the operator escape hatch for the hard-coded type allow-list: a human
+/// (never the agent) widens coverage by exporting the env var; every workflow
+/// control (plan/approval/backup/drift/audit/restore) still applies.
+pub fn endpointFor(env: *const std.process.Environ.Map, resource_type: []const u8) ?[]const u8 {
+    if (endpoint(resource_type)) |e| return e;
+    return extraEndpoint(env, resource_type);
+}
+
+/// Parse `NBX_GUARD_EXTRA_RESOURCES` (`type=path,type2=path2`) for an operator-
+/// added type. The returned slice borrows the env string, which lives for the
+/// whole process, so no allocation is needed.
+pub fn extraEndpoint(env: *const std.process.Environ.Map, resource_type: []const u8) ?[]const u8 {
+    const spec = env.get("NBX_GUARD_EXTRA_RESOURCES") orelse return null;
+    var it = std.mem.tokenizeScalar(u8, spec, ',');
+    while (it.next()) |pair_raw| {
+        const pair = std.mem.trim(u8, pair_raw, " \t");
+        const eqi = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        const key = std.mem.trim(u8, pair[0..eqi], " \t");
+        const ep = std.mem.trim(u8, pair[eqi + 1 ..], " \t/");
+        if (key.len == 0 or ep.len == 0) continue;
+        if (std.mem.eql(u8, key, resource_type)) return ep;
     }
     return null;
 }
@@ -67,6 +94,18 @@ pub const Client = struct {
         return self.request(.GET, resource_type, id, null);
     }
 
+    /// `GET` the collection endpoint with an already-encoded query string (no
+    /// leading `?`). Used by `list-resources`/`search` for read-only discovery.
+    pub fn list(self: *Client, resource_type: []const u8, query: []const u8) !Result {
+        const ep = endpointFor(self.ctx.env, resource_type) orelse return Error.UnknownResourceType;
+        const arena = self.ctx.arena;
+        const url = if (query.len > 0)
+            try std.fmt.allocPrint(arena, "{s}/api/{s}/?{s}", .{ self.ctx.config.netbox_url, ep, query })
+        else
+            try std.fmt.allocPrint(arena, "{s}/api/{s}/", .{ self.ctx.config.netbox_url, ep });
+        return self.send(.GET, url, null, true);
+    }
+
     pub fn patch(self: *Client, resource_type: []const u8, id: []const u8, body: []const u8) !Result {
         return self.request(.PATCH, resource_type, id, body);
     }
@@ -94,7 +133,7 @@ pub const Client = struct {
         id: ?[]const u8,
         payload: ?[]const u8,
     ) !Result {
-        const ep = endpoint(resource_type) orelse return Error.UnknownResourceType;
+        const ep = endpointFor(self.ctx.env, resource_type) orelse return Error.UnknownResourceType;
         const arena = self.ctx.arena;
 
         const url = if (id) |rid|
@@ -197,6 +236,28 @@ test "endpoint mapping" {
     try std.testing.expectEqualStrings("ipam/ip-addresses", endpoint("ip-address").?);
     try std.testing.expectEqualStrings("tenancy/contacts", endpoint("contact").?);
     try std.testing.expect(endpoint("nope") == null);
+}
+
+test "endpointFor resolves operator extras (NBX_GUARD_EXTRA_RESOURCES)" {
+    const a = std.testing.allocator;
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("NBX_GUARD_EXTRA_RESOURCES", "site=dcim/sites, tenant=tenancy/tenants ");
+    // built-ins keep resolving
+    try std.testing.expectEqualStrings("dcim/devices", endpointFor(&env, "device").?);
+    // operator-added types resolve (whitespace + trailing slash tolerated)
+    try std.testing.expectEqualStrings("dcim/sites", endpointFor(&env, "site").?);
+    try std.testing.expectEqualStrings("tenancy/tenants", endpointFor(&env, "tenant").?);
+    // anything not built-in or listed stays unknown (default-deny on types)
+    try std.testing.expect(endpointFor(&env, "nope") == null);
+}
+
+test "endpointFor without extras is built-ins only" {
+    const a = std.testing.allocator;
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try std.testing.expect(endpointFor(&env, "site") == null);
+    try std.testing.expectEqualStrings("ipam/vlans", endpointFor(&env, "vlan").?);
 }
 
 test "authHeader selects scheme by token version" {
