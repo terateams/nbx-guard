@@ -169,6 +169,17 @@ pub const Client = struct {
         // timed connection can be injected.
         const uri = try std.Uri.parse(url);
         const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedUriScheme;
+
+        // `std.http.Client` initializes its TLS trust store (the system CA
+        // bundle and the clock used to check certificate expiry) lazily the
+        // first time it runs `request()`. Because we connect ourselves via
+        // `connectTcpOptions` (to inject the connect timeout) that lazy init
+        // never runs, so the TLS handshake would dereference a null
+        // `client.now` and panic. Prime the trust store here so an
+        // unreachable, misconfigured, or TLS-failing NetBox surfaces as a
+        // normal error envelope instead of crashing the CLI.
+        if (protocol == .tls) try primeTlsTrust(&self.http, self.ctx.io);
+
         var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
         const host = try uri.getHost(&host_buf);
         const port: u16 = uri.port orelse if (protocol == .tls) 443 else 80;
@@ -221,6 +232,19 @@ pub const Client = struct {
         };
     }
 };
+
+/// Prime `std.http.Client`'s TLS trust store so a TLS handshake driven through
+/// `connectTcpOptions` does not dereference a null `now`. `request()` normally
+/// does this lazily, but we bypass it to inject a connect timeout. Mirrors the
+/// std lazy-init: scan the system CA bundle and record the validation clock.
+fn primeTlsTrust(http: *std.http.Client, io: std.Io) !void {
+    if (!std.http.Client.disable_tls) {
+        if (http.now != null) return;
+        const now = std.Io.Clock.real.now(io);
+        try http.ca_bundle.rescan(http.allocator, io, now);
+        http.now = now;
+    }
+}
 
 /// Build the per-request connect timeout from config. `0` means no timeout.
 fn timeoutFor(config: Config) std.Io.Timeout {
@@ -276,4 +300,21 @@ test "activeBranch routing" {
     try std.testing.expect(activeBranch(.{ .branching = false, .branch = "td5smq0f" }) == null); // schema id but disabled
     try std.testing.expect(activeBranch(.{ .branching = true, .branch = "" }) == null); // empty schema id
     try std.testing.expectEqualStrings("td5smq0f", activeBranch(.{ .branching = true, .branch = "td5smq0f" }).?);
+}
+
+test "primeTlsTrust initializes the TLS validation clock" {
+    // Regression: HTTPS requests connect via `connectTcpOptions`, bypassing the
+    // lazy trust-store init in `std.http.Client.request()`. Without priming,
+    // the TLS handshake dereferences a null `now` and panics instead of
+    // returning an error envelope. After priming, `now` must be set so the
+    // handshake can proceed (and any failure surfaces as a normal error).
+    if (std.http.Client.disable_tls) return error.SkipZigTest;
+    var http: std.http.Client = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    defer http.deinit();
+    try std.testing.expect(http.now == null);
+    try primeTlsTrust(&http, std.testing.io);
+    try std.testing.expect(http.now != null);
+    // Idempotent: a second call leaves the already-initialized clock in place.
+    try primeTlsTrust(&http, std.testing.io);
+    try std.testing.expect(http.now != null);
 }
