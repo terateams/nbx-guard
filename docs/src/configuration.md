@@ -1,22 +1,22 @@
-# Configuration
+# 配置
 
-All configuration is read from the **process environment** (see `.env.example` in the
-repository). Nothing is written to NetBox without a token.
+所有配置都从**进程环境变量**读取（参见仓库中的 `.env.example`）。没有 token
+就不会向 NetBox 写入任何东西。
 
-| Variable | Default | Purpose |
+| 变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `NETBOX_URL` | `http://localhost:8000` | NetBox base URL. A trailing slash is stripped. |
-| `NETBOX_TOKEN` | _(unset)_ | API token; **required** for `get` / `inspect` / `apply` / `restore`. |
-| `NBX_GUARD_STATE_DIR` | `.nbx-guard` | Local state directory (plans, approvals, backups, audit log). |
-| `NBX_GUARD_BRANCHING` | `0` | Route reads/writes through a NetBox Branching branch. |
-| `NBX_GUARD_BRANCH` | _(unset)_ | Active branch schema id, sent as the `X-NetBox-Branch` header. |
+| `NETBOX_URL` | `http://localhost:8000` | NetBox 基础 URL，末尾的斜杠会被去掉。 |
+| `NETBOX_TOKEN` | _（未设置）_ | API token；`get` / `inspect` / `apply` / `restore` **必需**。 |
+| `NBX_GUARD_STATE_DIR` | `.nbx-guard` | 本地状态目录（plans、approvals、backups、审计日志）。 |
+| `NBX_GUARD_BRANCHING` | `0` | 将读写路由进某个 NetBox Branching 分支。 |
+| `NBX_GUARD_BRANCH` | _（未设置）_ | 生效分支的 schema id，作为 `X-NetBox-Branch` 头发送。 |
 
-## Boolean parsing
+## 布尔值解析
 
-`NBX_GUARD_BRANCHING` is treated as **true** for `1`, `true`, `yes`, or `on`
-(case-insensitive). Anything else — including unset — is **false**.
+`NBX_GUARD_BRANCHING` 在取值为 `1`、`true`、`yes`、`on`（不区分大小写）时视为 **true**。
+其它任何值——包括未设置——都视为 **false**。
 
-## Example `.env`
+## `.env` 示例
 
 ```sh
 export NETBOX_URL=https://netbox.example.com
@@ -25,32 +25,30 @@ export NBX_GUARD_STATE_DIR=.nbx-guard
 export NBX_GUARD_BRANCHING=0
 ```
 
-## Where state lives
+## 状态存放在哪里
 
-By default nbx-guard writes its plans, approvals, backups, and audit log under
-`.nbx-guard/` in the current working directory. Point `NBX_GUARD_STATE_DIR` at a
-durable, access-controlled location if you want the audit trail to persist across runs
-or be shared by a team. See [Local State](./state.md) for the on-disk layout.
+默认情况下，nbx-guard 把 plans、approvals、backups 和审计日志写到当前工作目录下的
+`.nbx-guard/`。如果你希望审计轨迹跨多次运行持久保留、或被团队共享，就把
+`NBX_GUARD_STATE_DIR` 指向一个持久、有访问控制的位置。磁盘布局见
+[本地状态](./state.md)。
 
-## Token handling
+## token 的处理
 
-The token is read from the environment and sent as a `Token <token>` Authorization
-header to NetBox. It is **never** written to the local state directory and never printed
-in command output — `version` only reports `token_configured: true|false`.
+token 从环境读取，并作为 `Token <token>` 的 Authorization 头发送给 NetBox。它
+**绝不**写入本地状态目录，也绝不在命令输出中打印——`version` 只报告
+`token_configured: true|false`。
 
 ## NetBox Branching
 
-When `NBX_GUARD_BRANCHING` is enabled **and** `NBX_GUARD_BRANCH` holds a branch's schema
-id, nbx-guard adds the `X-NetBox-Branch: <schema_id>` header to every NetBox request.
-Reads, backups, and the apply PATCH are then scoped to that branch instead of `main`, so
-an agent's guarded changes accumulate in an isolated branch for later review.
+当 `NBX_GUARD_BRANCHING` 启用**且** `NBX_GUARD_BRANCH` 含有某个分支的 schema id 时，
+nbx-guard 会给每个 NetBox 请求加上 `X-NetBox-Branch: <schema_id>` 头。这样读取、备份
+以及 apply 的 PATCH 就都被限定在该分支内，而不是 `main`，于是 agent 的受控变更会在
+一个隔离的分支里累积，留待后续审查。
 
-- The schema id is the eight-character identifier shown in a branch's REST API
-  representation or detail view — **without** the `branch_` prefix.
-- If branching is off, or the schema id is empty, no header is sent and writes go to
-  `main` directly.
-- `version` echoes the resolved active branch so you can confirm routing is on.
+- schema id 是分支 REST API 表示或详情页里显示的那个八字符标识——**不含** `branch_` 前缀。
+- 如果分支未启用、或 schema id 为空，则不发送该头，写入直接落到 `main`。
+- `version` 会回显解析后生效的分支，便于你确认路由已开启。
 
-Creating a branch and running its `sync` / `merge` / `revert` lifecycle is done through
-NetBox's own Branching API; those approver-level actions are deliberately not exposed by
-the gateway. See [Architecture](./architecture.md#netbox-branching).
+创建分支以及运行它的 `sync` / `merge` / `revert` 生命周期，是通过 NetBox 自身的
+Branching API 完成的；这些审批者级别的操作刻意不由本网关暴露。参见
+[架构](./architecture.md#netbox-branching)。

@@ -1,77 +1,75 @@
-# Workflows
+# 工作流
 
-Set your connection once:
+先一次性设置好连接：
 
 ```sh
 export NETBOX_URL=https://netbox.example.com
 export NETBOX_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-## Low-risk change
+## 低风险变更
 
-A change that touches only allowed fields (`description`, `comments`, `tags`,
-`custom_fields`) needs no approval.
+只触及允许字段（`description`、`comments`、`tags`、`custom_fields`）的变更无需审批。
 
 ```sh
 nbx-guard plan device 1 --set description="edge router"
 # -> { plan_id, plan_hash, risk_level: "low", status: "planned",
 #      next_action: "low-risk: run `nbx-guard apply --plan <plan_id>`" }
 
-nbx-guard apply --plan plan_...      # snapshots a backup, PATCHes, writes audit
-nbx-guard restore --backup bkp_...   # revert if needed
+nbx-guard apply --plan plan_...      # 快照一份备份，PATCH，写审计
+nbx-guard restore --backup bkp_...   # 需要时回滚
 ```
 
-## High-risk change (requires approval)
+## 高风险变更（需要审批）
 
-A change that touches any high-risk field (`status`, `role`, `site`, `rack`, `prefix`,
-`address`) must be approved first.
+触及任一高风险字段（`status`、`role`、`site`、`rack`、`prefix`、`address`）的变更必须
+先经过审批。
 
 ```sh
 nbx-guard plan device 1 --set status=active
 # -> status: "pending_approval", next_action: "...approve... then apply"
 
 nbx-guard apply --plan plan_...
-# refused: error.kind = "not_approved"
+# 被拒：error.kind = "not_approved"
 
 nbx-guard approve --plan plan_... --note "approved by netops"
-nbx-guard apply --plan plan_...      # now allowed
+nbx-guard apply --plan plan_...      # 现在被允许
 ```
 
-## Denied change
+## 被拒绝的变更
 
-A change to a field outside the policy is rejected at plan time — nothing is stored:
+改动策略之外字段的变更，会在 plan 阶段就被拒绝——不存储任何东西：
 
 ```sh
 nbx-guard plan device 1 --set name="core-1"
-# -> error.kind = "policy_denied" (name is not a writable field)
+# -> error.kind = "policy_denied"（name 不是可写字段）
 ```
 
-## Inspecting before proposing
+## 提议前先 inspect
 
-An agent can look at a resource together with the policy to decide what it may safely
-propose:
+agent 可以把资源连同策略一起查看，从而决定能安全提议什么：
 
 ```sh
 nbx-guard inspect device 1
-# data.resource = live resource; data.policy = allowed/high-risk fields
+# data.resource = 实时资源；data.policy = 允许/高风险字段
 ```
 
-## Auditing and listing
+## 审计与列举
 
 ```sh
-nbx-guard audit                 # full audit trail
-nbx-guard audit --plan plan_... # only events for one plan
-nbx-guard list plans            # stored plans
-nbx-guard list approvals        # stored approvals
-nbx-guard list backups          # stored backups
+nbx-guard audit                 # 完整审计轨迹
+nbx-guard audit --plan plan_... # 只看某个 plan 的事件
+nbx-guard list plans            # 已存储的 plans
+nbx-guard list approvals        # 已存储的 approvals
+nbx-guard list backups          # 已存储的 backups
 ```
 
-## Recommended agent loop
+## 推荐的 agent 循环
 
-1. `inspect` the resource to learn which fields are writable.
-2. `plan` the intended change.
-3. Read `next_action` from the envelope:
-   - `low` risk → `apply`.
-   - `high` risk → ask a human to `approve`, then `apply`.
-4. Keep the returned `backup_id` so the change can be `restore`d.
-5. Use `audit` / `request_id` to confirm and trace the outcome.
+1. `inspect` 资源，了解哪些字段可写。
+2. `plan` 出预期的变更。
+3. 读取信封里的 `next_action`：
+   - `low` 风险 → `apply`。
+   - `high` 风险 → 请人工 `approve`，然后 `apply`。
+4. 保留返回的 `backup_id`，以便日后 `restore` 该变更。
+5. 用 `audit` / `request_id` 确认并追溯结果。

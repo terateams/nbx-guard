@@ -1,8 +1,8 @@
 [book]
 title = "nbx-guard"
-description = "Agent-only NetBox safe-change gateway, implemented in Zig."
+description = "面向 agent 的 NetBox 安全变更网关，使用 Zig 实现。"
 authors = ["terateams"]
-language = "en"
+language = "zh"
 src = "src"
 
 [output.html]

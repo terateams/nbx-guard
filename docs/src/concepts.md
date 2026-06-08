@@ -1,70 +1,66 @@
-# Core Concepts
+# 核心概念
 
-nbx-guard models a single, auditable lifecycle for every change. The agent only ever
-produces the *first* step (intent); the CLI owns everything after that.
+nbx-guard 为每一次变更建模出单一、可审计的生命周期。agent 永远只产生*第一步*
+（意图）；之后的一切都由 CLI 掌控。
 
 ```text
 plan ──> (approve) ──> apply ──> (restore)
   │           │           │           │
- policy    binds       backup +     reverts
- + risk   plan_hash     PATCH      from backup
+ 策略       绑定         备份 +       从备份
+ + 风险    plan_hash     PATCH        回滚
 ```
 
-## Plan
+## Plan（计划）
 
-A **plan** captures the agent's intent: a resource (`type` + `id`), the action
-(always `update` in the MVP), and a set of field `changes`. Creating a plan runs the
-[policy](./policy.md) engine and assigns a risk level. Nothing is written to NetBox at
-this stage.
+一个 **plan** 捕获 agent 的意图：一个资源（`type` + `id`）、动作（MVP 中恒为
+`update`），以及一组字段 `changes`。创建 plan 会运行[策略](./policy.md)引擎并赋予
+一个风险等级。此阶段不会向 NetBox 写入任何东西。
 
-Each plan has a status:
+每个 plan 都有一个状态：
 
-| Status | Meaning |
+| 状态 | 含义 |
 | --- | --- |
-| `planned` | Low-risk plan, ready to `apply`. |
-| `pending_approval` | High-risk plan, needs `approve` before it can be applied. |
-| `approved` | A high-risk plan that has been approved. |
-| `applied` | The change has been pushed to NetBox. |
-| `rejected` | Reserved for a rejected plan. |
+| `planned` | 低风险 plan，可直接 `apply`。 |
+| `pending_approval` | 高风险 plan，需先 `approve` 才能应用。 |
+| `approved` | 已审批的高风险 plan。 |
+| `applied` | 变更已推送到 NetBox。 |
+| `rejected` | 预留给被拒绝的 plan。 |
 
 ## `plan_hash`
 
-Every plan has a deterministic **`plan_hash`** — a SHA-256 over the canonical
-`{resource_type, resource_id, action, changes}`. It is the plan's tamper-evident
-identity: an approval binds to this hash, so an approved plan cannot be silently
-mutated and then applied.
+每个 plan 都有一个确定性的 **`plan_hash`**——对规范化的
+`{resource_type, resource_id, action, changes}` 求 SHA-256。它是 plan 的防篡改身份：
+审批绑定到这个哈希，因此一个已审批的 plan 无法被悄悄篡改后再应用。
 
-## Risk level
+## 风险等级
 
-The policy engine classifies the fields being changed:
+策略引擎对被改动的字段进行分类：
 
-- **low** — only allowed (low-risk) fields are touched → can be applied directly.
-- **high** — at least one high-risk field is touched → requires approval.
+- **low（低）**——只触及允许的（低风险）字段 → 可直接应用。
+- **high（高）**——触及至少一个高风险字段 → 需要审批。
 
-If any field is outside the policy, the plan is **denied** outright. See
-[Policy](./policy.md).
+如果有任何字段在策略之外，该 plan 会被直接拒绝。参见[策略](./policy.md)。
 
-## Approval
+## Approval（审批）
 
-An **approval** is a record bound to a plan's `plan_hash`. It records who approved it
-(`USER`, or `cli` if unset), an optional note, and a timestamp. Only plans in
-`pending_approval` can be approved.
+一份 **approval** 是绑定到某个 plan 的 `plan_hash` 的记录。它记录谁批准的
+（`USER`，未设置时为 `cli`）、可选的备注，以及时间戳。只有处于 `pending_approval`
+的 plan 才能被审批。
 
-## Backup
+## Backup（备份）
 
-Before any `apply`, nbx-guard fetches the current resource and stores a **backup**
-containing the full snapshot plus the *prior values* of exactly the fields being
-changed. This is what `restore` uses to revert.
+在任何 `apply` 之前，nbx-guard 会先获取当前资源，并存储一份 **backup**，其中包含
+完整快照，外加*恰好*那些将被改动字段的*原值（prior values）*。`restore` 正是用它
+来回滚。
 
-## Audit
+## Audit（审计）
 
-Every meaningful event — `plan_created`, `approved`, `applied`, `apply_failed`,
-`restored` — is appended to an append-only JSONL **audit** log. Each entry links the
-relevant `request_id`, `plan_id`, `approval_id`, and `backup_id` so any change can be
-traced end to end.
+每一个有意义的事件——`plan_created`、`approved`、`applied`、`apply_failed`、
+`restored`——都会被追加到一个只追加（append-only）的 JSONL **审计**日志里。每条记录
+都关联相应的 `request_id`、`plan_id`、`approval_id` 和 `backup_id`，因此任何变更都能
+被端到端地追溯。
 
-## Request id
+## Request id（请求 id）
 
-Each command invocation that mutates state generates a `request_id`. It appears in the
-response envelope and in the audit log, giving you a correlation handle across the plan,
-approval, apply, and restore events.
+每一次会改动状态的命令调用都会生成一个 `request_id`。它出现在响应信封和审计日志中，
+为你在 plan、approval、apply、restore 各事件之间提供一个关联句柄。

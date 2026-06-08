@@ -1,34 +1,32 @@
-# Getting Started
+# 快速开始
 
-## Requirements
+## 环境要求
 
-- **Zig 0.16.0** (to build from source)
-- A reachable **NetBox** instance and an API token (for any command that touches NetBox)
+- **Zig 0.16.0**（从源码构建时需要）
+- 一个可访问的 **NetBox** 实例及 API token（任何涉及 NetBox 的命令都需要）
 
-## Build & test
+## 构建与测试
 
 ```sh
-zig build           # produces ./zig-out/bin/nbx-guard
-zig build test      # run unit tests
+zig build           # 生成 ./zig-out/bin/nbx-guard
+zig build test      # 运行单元测试
 zig build run -- version
 ```
 
-The release binaries published on the
-[Releases page](https://github.com/terateams/nbx-guard/releases) are statically
-cross-compiled for Linux, macOS, and Windows (x86_64 and aarch64); download the archive
-for your platform and put `nbx-guard` on your `PATH`.
+[Releases 页面](https://github.com/terateams/nbx-guard/releases)上发布的二进制是为
+Linux、macOS、Windows（x86_64 与 aarch64）静态交叉编译的；下载对应平台的归档，
+把 `nbx-guard` 放到 `PATH` 即可。
 
-## First run
+## 首次运行
 
-`version` and `help` need no NetBox connection:
+`version` 和 `help` 不需要连接 NetBox：
 
 ```sh
 nbx-guard version
 nbx-guard help
 ```
 
-`version` echoes the active configuration so you can confirm the CLI sees your
-environment:
+`version` 会回显当前生效的配置，便于确认 CLI 是否读到了你的环境：
 
 ```json
 {
@@ -48,9 +46,9 @@ environment:
 }
 ```
 
-## Connect to NetBox
+## 连接 NetBox
 
-Set the URL and token, then read a resource:
+设置 URL 与 token，然后读取一个资源：
 
 ```sh
 export NETBOX_URL=https://netbox.example.com
@@ -59,20 +57,20 @@ export NETBOX_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 nbx-guard get device 1
 ```
 
-See [Configuration](./configuration.md) for all variables.
+全部变量见[配置](./configuration.md)。
 
-## A first safe change
+## 第一次安全变更
 
 ```sh
-# 1. Propose intent (policy + risk checked, nothing written yet)
+# 1. 提出意图（做策略 + 风险校验，此时不写入任何东西）
 nbx-guard plan device 1 --set description="edge router"
 
-# 2. Apply it (snapshots a backup, then PATCHes NetBox)
+# 2. 应用它（先快照一份备份，再 PATCH 到 NetBox）
 nbx-guard apply --plan plan_...
 
-# 3. Revert if needed
+# 3. 需要时回滚
 nbx-guard restore --backup bkp_...
 ```
 
-Low-risk fields apply without approval; high-risk fields must be approved first. See
-[Workflows](./workflows.md) for the full low-risk and high-risk paths.
+低风险字段无需审批即可应用；高风险字段必须先经过审批。完整的低风险与高风险
+路径见[工作流](./workflows.md)。

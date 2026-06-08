@@ -1,48 +1,46 @@
-# Introduction
+# 介绍
 
-**nbx-guard** is an agent-only [NetBox](https://netbox.dev/) safe-change gateway,
-implemented in [Zig](https://ziglang.org/).
+**nbx-guard** 是一个面向 agent 的 [NetBox](https://netbox.dev/) 安全变更网关，
+使用 [Zig](https://ziglang.org/) 实现。
 
-> **Design principle:** the agent only proposes *intent*; the CLI decides what is
-> actually allowed to happen.
+> **设计原则：** agent 只提出变更*意图*；究竟能不能做、怎么做，由 CLI 决定。
 
-nbx-guard sits between an LLM/agent and NetBox. The agent can never call the NetBox
-API directly — it can only ask nbx-guard to *plan* a change. The CLI then enforces
-policy, risk-based approval, pre-apply backup, audit logging, and restore. Even if the
-agent claims it has full permissions, the approval rules are enforced here.
+nbx-guard 位于 LLM/agent 与 NetBox 之间。agent 永远无法直接调用 NetBox API——
+它只能请求 nbx-guard 去*规划（plan）*一次变更。随后由 CLI 来执行策略校验、
+基于风险的审批、应用前备份、审计日志与回滚。即使 agent 声称自己拥有全部权限，
+审批规则也在这里被强制执行。
 
 ```text
 Agent / LLM ──> nbx-guard CLI (Zig) ──> NetBox REST API
                       │                  NetBox Branching
-                      └─> local state: plans / backups / approvals / audit
+                      └─> 本地状态：plans / backups / approvals / audit
                                          ▲
-                                 human approver
+                                     人工审批者
 ```
 
-## Core guarantees
+## 核心保证
 
-- **Default-deny** — a field is writable only if policy explicitly classifies it.
-- **Plan first** — no write happens without a stored `plan`; `apply` only accepts a `plan_id`.
-- **Approval gate** — high-risk fields require an approval bound to the plan's `plan_hash`.
-- **Backup before apply** — every apply snapshots the resource and the prior field values.
-- **Audit everything** — append-only JSONL trace; every event links to
-  `plan_id` / `approval_id` / `backup_id` / `request_id`.
-- **Restorable** — any applied change can be reverted from its backup.
-- **No raw / delete** — only `update` is permitted; `delete` / `bulk_delete` / raw
-  API access are not exposed.
-- **Agent-friendly JSON** — every command prints one envelope with `ok`, `data`, and an
-  `error` carrying `kind`, `risk_level`, and `next_action`.
+- **默认拒绝（default-deny）**——只有被策略明确分类的字段才可写。
+- **先规划（plan first）**——没有已存储的 `plan` 就不会发生任何写入；`apply` 只接受 `plan_id`。
+- **审批门禁**——高风险字段需要一份绑定到该 plan 的 `plan_hash` 的审批。
+- **应用前备份**——每次 apply 都会对资源及其原字段值做快照。
+- **全程审计**——只追加（append-only）的 JSONL 轨迹；每条事件都关联
+  `plan_id` / `approval_id` / `backup_id` / `request_id`。
+- **可回滚**——任何已应用的变更都能从其备份恢复。
+- **无原始访问 / 无删除**——只允许 `update`；`delete` / `bulk_delete` / 原始 API
+  访问一律不暴露。
+- **对 agent 友好的 JSON**——每条命令都打印一个信封（envelope），包含 `ok`、`data`，
+  以及携带 `kind`、`risk_level`、`next_action` 的 `error`。
 
-## Who is this for?
+## 适合谁用
 
-- **Platform / NetOps teams** who want to let an agent propose NetBox changes without
-  granting it unmediated write access.
-- **Agent authors** who need a deterministic, machine-readable contract (one JSON
-  envelope per command) for proposing and applying changes.
+- **平台 / 网络运维团队**：希望让 agent 提出 NetBox 变更，但不给它不受约束的写权限。
+- **agent 作者**：需要一个确定性的、机器可读的契约（每条命令一个 JSON 信封）来提出并应用变更。
 
-## Status
+## 状态
 
-MVP. NetBox Branching (`diff` / `sync` / `merge`) is configurable but the direct-PATCH
-path is the default apply mechanism in this version.
+MVP。启用 NetBox Branching 后，受控变更会通过 `X-NetBox-Branch` 头路由进某个分支；
+分支生命周期（`diff` / `sync` / `merge`）通过 NetBox 自身的 Branching API 处理。
+未启用分支时，默认的应用方式是对 `main` 直接 PATCH。
 
-Continue with [Getting Started](./getting-started.md).
+继续阅读[快速开始](./getting-started.md)。

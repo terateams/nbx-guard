@@ -1,93 +1,92 @@
 # nbx-guard
 
-**Agent-only NetBox safe-change gateway, implemented in Zig.**
+**面向 agent 的 NetBox 安全变更网关，使用 Zig 实现。**
 
-> 设计原则 / Design principle: **Agent 只提意图，CLI 决定能不能做。**
-> The agent only proposes *intent*; the CLI decides what is actually allowed to happen.
+> 设计原则：**Agent 只提意图，CLI 决定能不能做。**
+> agent 只提出变更*意图*；究竟能不能做、怎么做，由 CLI 决定。
 
-nbx-guard sits between an LLM/agent and NetBox. The agent can never call the NetBox
-API directly — it can only ask nbx-guard to *plan* a change. The CLI then enforces
-policy, risk-based approval, pre-apply backup, audit logging, and restore. Even if the
-agent claims it has full permissions, the approval rules are enforced here.
+nbx-guard 位于 LLM/agent 与 NetBox 之间。agent 永远无法直接调用 NetBox API——
+它只能请求 nbx-guard 去*规划（plan）*一次变更。随后由 CLI 执行策略校验、基于风险的
+审批、应用前备份、审计日志与回滚。即使 agent 声称自己拥有全部权限，审批规则也在这里
+被强制执行。
 
 ```
 Agent / LLM ──> nbx-guard CLI (Zig) ──> NetBox REST API
                       │                  NetBox Branching
-                      └─> local state: plans / backups / approvals / audit
-                                         ▲
-                                 human approver
+                      └─> 本地状态：plans / backups / approvals / audit
+                                          ▲
+                                      人工审批者
 ```
 
-## Core guarantees
+## 核心保证
 
-- **Default-deny** — a field is writable only if policy explicitly classifies it.
-- **Plan first** — no write happens without a stored `plan`; `apply` only accepts a `plan_id`.
-- **Approval gate** — high-risk fields require an approval bound to the plan's `plan_hash`.
-- **Backup before apply** — every apply snapshots the resource and the prior field values.
-- **Audit everything** — append-only JSONL trace, every event links to `plan_id` / `approval_id` / `backup_id` / `request_id`.
-- **Restorable** — any applied change can be reverted from its backup.
-- **No raw / delete** — only `update` is permitted; `delete` / `bulk_delete` / raw API access are not exposed.
-- **Agent-friendly JSON** — every command prints one envelope with `ok`, `data`, and an `error` carrying `kind`, `risk_level`, and `next_action`.
+- **默认拒绝（default-deny）**——只有被策略明确分类的字段才可写。
+- **先规划（plan first）**——没有已存储的 `plan` 就不会发生任何写入；`apply` 只接受 `plan_id`。
+- **审批门禁**——高风险字段需要一份绑定到该 plan 的 `plan_hash` 的审批。
+- **应用前备份**——每次 apply 都会对资源及其原字段值做快照。
+- **全程审计**——只追加（append-only）的 JSONL 轨迹，每条事件都关联 `plan_id` / `approval_id` / `backup_id` / `request_id`。
+- **可回滚**——任何已应用的变更都能从其备份恢复。
+- **无原始访问 / 无删除**——只允许 `update`；`delete` / `bulk_delete` / 原始 API 访问都不暴露。
+- **对 agent 友好的 JSON**——每条命令都打印一个信封，含 `ok`、`data`，以及携带 `kind`、`risk_level`、`next_action` 的 `error`。
 
-## Build & test
+## 构建与测试
 
-Requires **Zig 0.16.0**.
+需要 **Zig 0.16.0**。
 
 ```sh
-zig build           # produces ./zig-out/bin/nbx-guard
-zig build test      # run unit tests
+zig build           # 产出 ./zig-out/bin/nbx-guard
+zig build test      # 运行单元测试
 zig build run -- version
 ```
 
-## Configuration
+## 配置
 
-Set via environment (see `.env.example`):
+通过环境变量设置（见 `.env.example`）：
 
-| Variable | Default | Purpose |
+| 变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `NETBOX_URL` | `http://localhost:8000` | NetBox base URL |
-| `NETBOX_TOKEN` | _(unset)_ | API token; required for `get`/`inspect`/`apply`/`restore` |
-| `NBX_GUARD_STATE_DIR` | `.nbx-guard` | Local state directory |
-| `NBX_GUARD_BRANCHING` | `0` | Route reads/writes through a NetBox Branching branch |
-| `NBX_GUARD_BRANCH` | _(unset)_ | Active branch schema id (sent as `X-NetBox-Branch`) |
+| `NETBOX_URL` | `http://localhost:8000` | NetBox 基础 URL |
+| `NETBOX_TOKEN` | _（未设置）_ | API token；`get`/`inspect`/`apply`/`restore` 必需 |
+| `NBX_GUARD_STATE_DIR` | `.nbx-guard` | 本地状态目录 |
+| `NBX_GUARD_BRANCHING` | `0` | 将读写路由进某个 NetBox Branching 分支 |
+| `NBX_GUARD_BRANCH` | _（未设置）_ | 生效分支的 schema id（作为 `X-NetBox-Branch` 发送） |
 
-When `NBX_GUARD_BRANCHING` is enabled **and** `NBX_GUARD_BRANCH` holds a branch's
-schema id, every NetBox request carries the `X-NetBox-Branch: <schema_id>` header, so
-guarded changes land in that branch instead of `main`. Create the branch and later
-`sync`/`merge`/`revert` it via NetBox's own Branching API — those approver-level
-lifecycle actions are intentionally outside the agent gateway.
+当 `NBX_GUARD_BRANCHING` 启用**且** `NBX_GUARD_BRANCH` 含有某个分支的 schema id 时，
+每个 NetBox 请求都会带上 `X-NetBox-Branch: <schema_id>` 头，于是受控变更落到该分支而
+非 `main`。分支的创建以及之后的 `sync`/`merge`/`revert`，通过 NetBox 自身的 Branching
+API 完成——这些审批者级别的生命周期操作刻意不由 agent 网关承担。
 
-## Policy (MVP)
+## 策略（MVP）
 
-| Class | Fields | Behavior |
+| 分类 | 字段 | 行为 |
 | --- | --- | --- |
-| Allowed (low-risk) | `description`, `comments`, `tags`, `custom_fields` | applied directly |
-| High-risk | `status`, `role`, `site`, `rack`, `prefix`, `address` | require approval |
-| Everything else | — | **denied** |
+| 允许（低风险） | `description`、`comments`、`tags`、`custom_fields` | 直接应用 |
+| 高风险 | `status`、`role`、`site`、`rack`、`prefix`、`address` | 需要审批 |
+| 其它一切 | — | **拒绝** |
 
-Supported resource types: `device`, `interface`, `ip-address`, `prefix`, `vlan`.
+支持的资源类型：`device`、`interface`、`ip-address`、`prefix`、`vlan`。
 
-## Commands
+## 命令
 
 ```
-nbx-guard version                          Print version and active configuration
-nbx-guard help                             Show help
-nbx-guard get <type> <id>                  Read a resource (read-only)
-nbx-guard inspect <type> <id>              Read a resource annotated with field policy
-nbx-guard plan <type> <id> --set k=v ...   Create a change plan (policy + risk checked)
-nbx-guard approve --plan <id> [--note x]   Approve a high-risk plan (binds plan_hash)
-nbx-guard apply --plan <id>                Backup, then apply an approved/low-risk plan
-nbx-guard restore --backup <id>            Revert a resource from a backup snapshot
-nbx-guard audit [--plan <id>]              Show the audit log
-nbx-guard list <plans|approvals|backups>   List local state
+nbx-guard version                          打印版本与当前生效配置
+nbx-guard help                             显示帮助
+nbx-guard get <type> <id>                  读取资源（只读）
+nbx-guard inspect <type> <id>              读取资源并标注字段策略
+nbx-guard plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
+nbx-guard approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
+nbx-guard apply --plan <id>                先备份，再应用一个已审批/低风险的 plan
+nbx-guard restore --backup <id>            从备份快照回滚资源
+nbx-guard audit [--plan <id>]              显示审计日志
+nbx-guard list <plans|approvals|backups>   列出本地状态
 ```
 
-`--set` values are parsed as JSON when possible (numbers, booleans, arrays, objects),
-otherwise treated as strings — e.g. `--set description="edge router"`, `--set tags='["core"]'`.
+`--set` 的取值在可能时按 JSON 解析（数字、布尔、数组、对象），否则当作字符串——
+例如 `--set description="edge router"`、`--set tags='["core"]'`。
 
-## Workflow
+## 工作流
 
-### Low-risk change
+### 低风险变更
 
 ```sh
 export NETBOX_URL=http://netbox.local NETBOX_TOKEN=xxxx
@@ -95,23 +94,23 @@ export NETBOX_URL=http://netbox.local NETBOX_TOKEN=xxxx
 nbx-guard plan device 1 --set description="edge router"
 # -> { plan_id, plan_hash, risk_level: "low", status: "planned", next_action: "apply" }
 
-nbx-guard apply --plan plan_...      # snapshots, PATCHes, writes audit + backup
-nbx-guard restore --backup bkp_...   # revert if needed
+nbx-guard apply --plan plan_...      # 快照、PATCH、写审计 + 备份
+nbx-guard restore --backup bkp_...   # 需要时回滚
 ```
 
-### High-risk change (requires approval)
+### 高风险变更（需要审批）
 
 ```sh
 nbx-guard plan device 1 --set status=active
 # -> status: "pending_approval", next_action: "approve"
 
-nbx-guard apply --plan plan_...      # refused: error.kind = "not_approved"
+nbx-guard apply --plan plan_...      # 被拒：error.kind = "not_approved"
 
 nbx-guard approve --plan plan_... --note "approved by netops"
-nbx-guard apply --plan plan_...      # now allowed
+nbx-guard apply --plan plan_...      # 现在被允许
 ```
 
-## Response envelope
+## 响应信封
 
 ```json
 {
@@ -127,13 +126,13 @@ nbx-guard apply --plan plan_...      # now allowed
 }
 ```
 
-`error.kind` is one of: `invalid_args`, `config_error`, `policy_denied`, `invalid_field`,
-`needs_approval`, `not_approved`, `plan_not_found`, `approval_not_found`, `backup_not_found`,
-`plan_state_error`, `netbox_error`, `conflict`, `io_error`, `not_implemented`.
+`error.kind` 为以下之一：`invalid_args`、`config_error`、`policy_denied`、`invalid_field`、
+`needs_approval`、`not_approved`、`plan_not_found`、`approval_not_found`、`backup_not_found`、
+`plan_state_error`、`netbox_error`、`conflict`、`io_error`、`not_implemented`。
 
-Exit codes: `0` success, `2` client/policy/state error, `3` upstream/config/IO error.
+退出码：`0` 成功，`2` 客户端/策略/状态错误，`3` 上游/配置/IO 错误。
 
-## Local state layout
+## 本地状态布局
 
 ```
 .nbx-guard/
@@ -143,33 +142,32 @@ Exit codes: `0` success, `2` client/policy/state error, `3` upstream/config/IO e
 └── audit.jsonl
 ```
 
-## Source layout
+## 源码布局
 
-| File | Responsibility |
+| 文件 | 职责 |
 | --- | --- |
-| `src/main.zig` | Entry point; builds `Context`, dispatches, sets exit code |
-| `src/cli.zig` | Command layer / workflow orchestration |
-| `src/context.zig` | Shared context + JSON response envelope + error model |
-| `src/config.zig` | Environment-driven configuration |
-| `src/policy.zig` | Default-deny field policy engine |
-| `src/plan.zig` | Plan model, change parsing, deterministic `plan_hash` |
-| `src/approval.zig` | Approval records bound to `plan_hash` |
-| `src/backup.zig` | Pre-apply snapshots and prior-value capture |
-| `src/audit.zig` | Append-only JSONL audit log |
-| `src/netbox.zig` | NetBox REST client (GET / PATCH only) |
-| `src/store.zig` | Local JSON/JSONL state storage |
-| `src/ids.zig` | ID generation and SHA-256 hashing |
+| `src/main.zig` | 入口；构建 `Context`，分发，设置退出码 |
+| `src/cli.zig` | 命令层 / 工作流编排 |
+| `src/context.zig` | 共享上下文 + JSON 响应信封 + 错误模型 |
+| `src/config.zig` | 由环境变量驱动的配置 |
+| `src/policy.zig` | 默认拒绝的字段策略引擎 |
+| `src/plan.zig` | plan 模型、changes 解析、确定性 `plan_hash` |
+| `src/approval.zig` | 绑定到 `plan_hash` 的审批记录 |
+| `src/backup.zig` | 应用前快照与原值捕获 |
+| `src/audit.zig` | 只追加的 JSONL 审计日志 |
+| `src/netbox.zig` | NetBox REST 客户端（仅 GET / PATCH） |
+| `src/store.zig` | 本地 JSON/JSONL 状态存储 |
+| `src/ids.zig` | id 生成与 SHA-256 哈希 |
 
-## Technology
+## 技术栈
 
-- Language: **Zig 0.16**
-- HTTP: `std.http.Client`
-- JSON: `std.json`
-- State: local JSON files + JSONL audit log
+- 语言：**Zig 0.16**
+- HTTP：`std.http.Client`
+- JSON：`std.json`
+- 状态：本地 JSON 文件 + JSONL 审计日志
 
-## Status
+## 状态
 
-MVP. With NetBox Branching enabled, guarded changes are routed into a branch via the
-`X-NetBox-Branch` header; branch lifecycle (`sync` / `merge` / `revert`) is handled
-through NetBox's own Branching API. Without branching, the default apply mechanism is a
-direct PATCH against `main`.
+MVP。启用 NetBox Branching 后，受控变更经 `X-NetBox-Branch` 头路由进某个分支；分支
+生命周期（`sync` / `merge` / `revert`）由 NetBox 自身的 Branching API 处理。未启用分支时，
+默认应用方式是对 `main` 直接 PATCH。

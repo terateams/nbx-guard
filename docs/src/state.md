@@ -1,8 +1,7 @@
-# Local State
+# 本地状态
 
-nbx-guard keeps all of its state in a single directory (default `.nbx-guard/`, override
-with `NBX_GUARD_STATE_DIR`). Everything is plain JSON / JSONL so it is easy to inspect,
-back up, and audit.
+nbx-guard 把它的全部状态保存在单一目录里（默认 `.nbx-guard/`，可用
+`NBX_GUARD_STATE_DIR` 覆盖）。一切都是纯 JSON / JSONL，便于查看、备份和审计。
 
 ```text
 .nbx-guard/
@@ -12,49 +11,47 @@ back up, and audit.
 └── audit.jsonl
 ```
 
-## Identifiers
+## 标识符
 
-IDs are prefixed and time-ordered so they sort chronologically and are easy to recognise
-in logs:
+id 带前缀且按时间排序，因此它们会按时间顺序排列，在日志里也易于辨认：
 
-| Prefix | Example | Created by |
+| 前缀 | 示例 | 由谁创建 |
 | --- | --- | --- |
 | `plan_` | `plan_1730000000_a1b2c3` | `plan` |
-| `req_` | `req_1730000000_d4e5f6` | every mutating command |
+| `req_` | `req_1730000000_d4e5f6` | 每条会改动状态的命令 |
 | `appr_` | `appr_1730000000_7890ab` | `approve` |
 | `bkp_` | `bkp_1730000000_cdef01` | `apply` |
 
-The form is `<prefix>_<unix_seconds>_<6 hex random>`.
+格式为 `<前缀>_<unix 秒>_<6 位十六进制随机数>`。
 
 ## Plans
 
-Each plan file stores the intent and verdict: `plan_id`, `request_id`, `plan_hash`,
-`resource_type`, `resource_id`, `action`, `changes`, `risk_level`, `requires_approval`,
-`status`, optional `approval_id` / `backup_id`, `created_at`, and `netbox_url`.
+每个 plan 文件存储意图与裁决：`plan_id`、`request_id`、`plan_hash`、`resource_type`、
+`resource_id`、`action`、`changes`、`risk_level`、`requires_approval`、`status`、
+可选的 `approval_id` / `backup_id`、`created_at`，以及 `netbox_url`。
 
 ## Approvals
 
-An approval binds to a plan's `plan_hash`: `approval_id`, `plan_id`, `plan_hash`,
-`resource_type`, `resource_id`, `risk_level`, `status`, `approver`, `created_at`, and an
-optional `note`. Because it carries the hash, an approval cannot be transplanted onto a
-different (mutated) plan.
+一份 approval 绑定到某个 plan 的 `plan_hash`：`approval_id`、`plan_id`、`plan_hash`、
+`resource_type`、`resource_id`、`risk_level`、`status`、`approver`、`created_at`，以及
+可选的 `note`。因为它带着哈希，所以一份 approval 无法被移植到另一个（被篡改的）plan 上。
 
 ## Backups
 
-A backup captures what is needed to revert: `backup_id`, `plan_id`, `resource_type`,
-`resource_id`, the full `snapshot` taken just before applying, the `prior_values` of the
-changed fields, `created_at`, and `netbox_url`. `restore` replays `prior_values`.
+一份 backup 捕获回滚所需的一切：`backup_id`、`plan_id`、`resource_type`、`resource_id`、
+紧接应用前所取的完整 `snapshot`、被改动字段的 `prior_values`、`created_at`，以及
+`netbox_url`。`restore` 会重放 `prior_values`。
 
-## Audit log
+## 审计日志
 
-`audit.jsonl` is **append-only**; one JSON object per line. Events include
-`plan_created`, `approved`, `applied`, `apply_failed`, and `restored`. Each entry carries
-a timestamp and the relevant `request_id`, `plan_id`, `approval_id`, and `backup_id`, so
-any change can be traced from intent to outcome (and to its reversal).
+`audit.jsonl` 是**只追加（append-only）**的；每行一个 JSON 对象。事件包括
+`plan_created`、`approved`、`applied`、`apply_failed` 和 `restored`。每条记录都带一个
+时间戳，以及相应的 `request_id`、`plan_id`、`approval_id`、`backup_id`，因此任何变更都能
+从意图一路追溯到结果（乃至它的回滚）。
 
-## Operational notes
+## 运维提示
 
-- Treat the state directory as the **source of truth** for what was changed and by whom;
-  store it somewhere durable and access-controlled in production.
-- The directory contains no secrets — the NetBox token is never persisted here.
-- The repository's `.gitignore` excludes `.nbx-guard/` so local runs are not committed.
+- 把状态目录当作“谁、改了什么”的**唯一可信来源**；生产环境中请存放在持久、有访问控制
+  的地方。
+- 该目录不含任何密钥——NetBox token 绝不会持久化在这里。
+- 仓库的 `.gitignore` 排除了 `.nbx-guard/`，因此本地运行不会被提交。

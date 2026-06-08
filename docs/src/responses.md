@@ -1,27 +1,27 @@
-# Response Format
+# 响应格式
 
-Every command prints exactly **one** JSON envelope to stdout and nothing else, so an
-agent can parse the result deterministically.
+每条命令都恰好向 stdout 打印**一个** JSON 信封，别无其它，因此 agent 能确定性地
+解析结果。
 
-## Envelope
+## 信封
 
 ```json
 {
   "ok": true,
   "command": "plan",
-  "data": { "...": "command-specific payload" },
+  "data": { "...": "命令相关的载荷" },
   "error": null
 }
 ```
 
-| Field | Type | Meaning |
+| 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `ok` | bool | `true` on success, `false` on failure. |
-| `command` | string | The command that produced this envelope. |
-| `data` | object \| null | Command-specific payload on success; `null` on failure. |
-| `error` | object \| null | Structured error on failure; `null` on success. |
+| `ok` | bool | 成功为 `true`，失败为 `false`。 |
+| `command` | string | 产生该信封的命令。 |
+| `data` | object \| null | 成功时为命令相关载荷；失败时为 `null`。 |
+| `error` | object \| null | 失败时为结构化错误；成功时为 `null`。 |
 
-## Error object
+## error 对象
 
 ```json
 {
@@ -37,40 +37,40 @@ agent can parse the result deterministically.
 }
 ```
 
-| Field | Meaning |
+| 字段 | 含义 |
 | --- | --- |
-| `kind` | Stable, machine-readable error category (see below). |
-| `message` | Human-readable explanation. |
-| `risk_level` | `low` or `high`. |
-| `next_action` | What the agent (or a human) should do next. |
+| `kind` | 稳定、机器可读的错误类别（见下）。 |
+| `message` | 人类可读的说明。 |
+| `risk_level` | `low` 或 `high`。 |
+| `next_action` | agent（或人）下一步该做什么。 |
 
-## Error kinds
+## 错误类别（error.kind）
 
-`error.kind` is always one of:
+`error.kind` 始终是以下之一：
 
-| Kind | Typical cause |
+| 类别 | 典型原因 |
 | --- | --- |
-| `invalid_args` | Unknown command or missing/invalid arguments. |
-| `config_error` | Configuration problem (e.g. missing token where required). |
-| `policy_denied` | A requested field is not writable (default-deny). |
-| `invalid_field` | A field value is not acceptable. |
-| `needs_approval` | The plan is high-risk and not yet approved. |
-| `not_approved` | `apply` attempted on an unapproved high-risk plan. |
-| `plan_not_found` | No plan with the given id. |
-| `approval_not_found` | No approval with the given id. |
-| `backup_not_found` | No backup with the given id. |
-| `plan_state_error` | Plan is in the wrong state for the operation. |
-| `netbox_error` | NetBox returned an error or was unreachable. |
-| `conflict` | The resource changed underneath the plan. |
-| `io_error` | Local state read/write failed. |
-| `not_implemented` | Feature not available in this build. |
+| `invalid_args` | 未知命令，或参数缺失/非法。 |
+| `config_error` | 配置问题（例如必需场景下缺少 token）。 |
+| `policy_denied` | 请求改动的字段不可写（默认拒绝）。 |
+| `invalid_field` | 字段取值不可接受。 |
+| `needs_approval` | plan 是高风险且尚未审批。 |
+| `not_approved` | 对未审批的高风险 plan 执行了 `apply`。 |
+| `plan_not_found` | 没有对应 id 的 plan。 |
+| `approval_not_found` | 没有对应 id 的 approval。 |
+| `backup_not_found` | 没有对应 id 的 backup。 |
+| `plan_state_error` | plan 状态不适合此操作。 |
+| `netbox_error` | NetBox 返回错误或不可达。 |
+| `conflict` | 资源在 plan 之下被改动了。 |
+| `io_error` | 本地状态读写失败。 |
+| `not_implemented` | 此构建中尚不可用的功能。 |
 
-## Exit codes
+## 退出码
 
-| Code | Meaning |
+| 码 | 含义 |
 | --- | --- |
-| `0` | Success. |
-| `2` | Client / policy / state error (your input or local state). |
-| `3` | Upstream / configuration / IO error (NetBox, env, disk). |
+| `0` | 成功。 |
+| `2` | 客户端 / 策略 / 状态错误（你的输入或本地状态）。 |
+| `3` | 上游 / 配置 / IO 错误（NetBox、环境、磁盘）。 |
 
-This lets a caller branch on the exit code first, then read `error.kind` for detail.
+这样调用方可以先按退出码分支，再读 `error.kind` 看细节。

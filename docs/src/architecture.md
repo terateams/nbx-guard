@@ -1,79 +1,77 @@
-# Architecture
+# 架构
 
-nbx-guard is a small, layered Zig program. The agent only reaches the **command layer**;
-every guarantee is enforced below it, and only one component may talk to NetBox.
+nbx-guard 是一个小巧、分层的 Zig 程序。agent 只能触达**命令层（command layer）**；
+每一项保证都在其下层被强制执行，并且只有一个组件可以与 NetBox 通信。
 
 ```text
         argv
           │
    ┌──────▼───────┐
-   │   cli.zig    │  parse, orchestrate workflow, print one JSON envelope
+   │   cli.zig    │  解析、编排工作流、打印一个 JSON 信封
    └──┬───┬───┬───┘
       │   │   │
- policy  plan/approval/backup/audit        netbox.zig ── GET / PATCH only ──> NetBox
- (deny)  (state via store.zig + ids.zig)
+ policy  plan/approval/backup/audit        netbox.zig ── 仅 GET / PATCH ──> NetBox
+ (拒绝)  (状态经 store.zig + ids.zig)
 ```
 
-## Source layout
+## 源码布局
 
-| File | Responsibility |
+| 文件 | 职责 |
 | --- | --- |
-| `src/main.zig` | Entry point; builds `Context`, dispatches, sets the exit code. |
-| `src/cli.zig` | Command layer / workflow orchestration. |
-| `src/context.zig` | Shared context + JSON response envelope + error model. |
-| `src/config.zig` | Environment-driven configuration. |
-| `src/policy.zig` | Default-deny field policy engine. |
-| `src/plan.zig` | Plan model, change parsing, deterministic `plan_hash`. |
-| `src/approval.zig` | Approval records bound to `plan_hash`. |
-| `src/backup.zig` | Pre-apply snapshots and prior-value capture. |
-| `src/audit.zig` | Append-only JSONL audit log. |
-| `src/netbox.zig` | NetBox REST client (GET / PATCH only). |
-| `src/store.zig` | Local JSON/JSONL state storage. |
-| `src/ids.zig` | ID generation and SHA-256 hashing. |
-| `src/root.zig` | Library re-exports and unit-test aggregator. |
+| `src/main.zig` | 入口；构建 `Context`，分发命令，设置退出码。 |
+| `src/cli.zig` | 命令层 / 工作流编排。 |
+| `src/context.zig` | 共享上下文 + JSON 响应信封 + 错误模型。 |
+| `src/config.zig` | 由环境变量驱动的配置。 |
+| `src/policy.zig` | 默认拒绝的字段策略引擎。 |
+| `src/plan.zig` | plan 模型、changes 解析、确定性 `plan_hash`。 |
+| `src/approval.zig` | 绑定到 `plan_hash` 的审批记录。 |
+| `src/backup.zig` | 应用前快照与原值捕获。 |
+| `src/audit.zig` | 只追加的 JSONL 审计日志。 |
+| `src/netbox.zig` | NetBox REST 客户端（仅 GET / PATCH）。 |
+| `src/store.zig` | 本地 JSON/JSONL 状态存储。 |
+| `src/ids.zig` | id 生成与 SHA-256 哈希。 |
+| `src/root.zig` | 库的再导出与单元测试聚合。 |
 
-## Design choices that enforce the guarantees
+## 强制这些保证的设计取舍
 
-- **One write verb.** `netbox.zig` exposes only `get` (GET) and `patch` (PATCH). There is
-  no function that performs DELETE or calls an arbitrary path, so "no raw / no delete" is
-  a structural property, not a runtime check.
-- **Policy is consulted twice.** At `plan` time and again at `apply` time against the
-  *stored* changes, so a plan cannot drift out of policy between proposal and application.
-- **Approval binds to `plan_hash`.** Because the hash covers the canonical
-  `{resource_type, resource_id, action, changes}`, an approved plan cannot be edited and
-  re-applied without invalidating the binding.
-- **Backup precedes the write.** `apply` always snapshots before it PATCHes, so every
-  applied change is reversible via `restore`.
-- **Single output contract.** `context.zig` is the only place that prints; every command
-  emits exactly one `{ ok, command, data, error }` envelope.
+- **只有一个写动词。** `netbox.zig` 只暴露 `get`（GET）和 `patch`（PATCH）。不存在执行
+  DELETE 或调用任意路径的函数，因此“无原始访问 / 无删除”是一种结构性属性，而非运行时检查。
+- **策略被检查两次。** 在 `plan` 时，以及在 `apply` 时再次针对*已存储*的 changes，因此
+  一个 plan 不会在提议与应用之间漂移出策略之外。
+- **审批绑定到 `plan_hash`。** 由于该哈希覆盖了规范化的
+  `{resource_type, resource_id, action, changes}`，一个已审批的 plan 无法在不令该绑定
+  失效的情况下被编辑后重新应用。
+- **备份先于写入。** `apply` 总是先快照再 PATCH，因此每个已应用的变更都可经 `restore`
+  回滚。
+- **单一输出契约。** `context.zig` 是唯一负责打印的地方；每条命令都恰好发出一个
+  `{ ok, command, data, error }` 信封。
 
-## Technology
+## 技术栈
 
-- Language: **Zig 0.16**
-- HTTP: `std.http.Client`
-- JSON: `std.json`
-- Hashing: `std.crypto.hash.sha2.Sha256`
-- State: local JSON files + a JSONL audit log
+- 语言：**Zig 0.16**
+- HTTP：`std.http.Client`
+- JSON：`std.json`
+- 哈希：`std.crypto.hash.sha2.Sha256`
+- 状态：本地 JSON 文件 + 一份 JSONL 审计日志
 
-## Build & CI
+## 构建与 CI
 
-`zig build` produces `zig-out/bin/nbx-guard`; `zig build test` runs the unit tests
-aggregated in `root.zig`. The repository ships three GitHub Actions workflows:
+`zig build` 产出 `zig-out/bin/nbx-guard`；`zig build test` 运行聚合在 `root.zig` 里的
+单元测试。仓库附带三条 GitHub Actions 工作流：
 
-- **CI** — builds and tests on Linux and macOS and checks `zig fmt` on every push/PR.
-- **Release** — on a `v*` tag, cross-compiles `ReleaseSafe` binaries for Linux, macOS,
-  and Windows (x86_64 + aarch64), packages them with checksums, and publishes a release.
-- **Docs** — builds this mdBook site and deploys it to GitHub Pages.
+- **CI**——在每次 push/PR 时于 Linux 和 macOS 上构建、测试，并检查 `zig fmt`。
+- **Release**——在打 `v*` 标签时，为 Linux、macOS、Windows（x86_64 + aarch64）交叉编译
+  `ReleaseSafe` 二进制，连同校验和打包，并发布一个 release。
+- **Docs**——构建本 mdBook 站点并部署到 GitHub Pages。
 
 ## NetBox Branching
 
-`NBX_GUARD_BRANCHING` / `NBX_GUARD_BRANCH` route guarded changes through the
-[NetBox Branching](https://github.com/netboxlabs/netbox-branching) plugin. When both are
-set, the NetBox client adds an `X-NetBox-Branch: <schema_id>` header to every request, so
-reads, the pre-apply backup, and the apply PATCH all operate within that branch instead
-of `main`. The change therefore stays isolated until a human reviews and merges the
-branch.
+`NBX_GUARD_BRANCHING` / `NBX_GUARD_BRANCH` 把受控变更路由进
+[NetBox Branching](https://github.com/netboxlabs/netbox-branching) 插件。两者都设置时，
+NetBox 客户端会给每个请求加上 `X-NetBox-Branch: <schema_id>` 头，于是读取、应用前备份
+以及 apply 的 PATCH 都在该分支内运作，而不是 `main`。因此该变更会保持隔离，直到有人
+审查并合并该分支。
 
-Branch creation and the `sync` / `merge` / `revert` lifecycle are intentionally **not**
-part of the gateway — they are approver-level operations performed via NetBox's own
-Branching API. nbx-guard only ever *targets* an existing branch; it never merges one.
+分支的创建以及 `sync` / `merge` / `revert` 生命周期刻意**不**属于本网关——它们是通过
+NetBox 自身 Branching API 执行的审批者级别操作。nbx-guard 永远只*瞄准*一个已存在的
+分支；它从不合并分支。

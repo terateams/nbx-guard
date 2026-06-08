@@ -1,41 +1,38 @@
-# Policy
+# 策略
 
-The policy engine is **default-deny**: a field may be written only if it is explicitly
-classified. This is the heart of nbx-guard — even a fully-trusted agent cannot change a
-field the policy does not know about.
+策略引擎采用**默认拒绝（default-deny）**：只有被明确分类的字段才可写入。这是
+nbx-guard 的核心——即便是完全可信的 agent，也无法改动一个策略并不认识的字段。
 
-## Field classes
+## 字段分类
 
-| Class | Fields | Behavior |
+| 分类 | 字段 | 行为 |
 | --- | --- | --- |
-| Allowed (low-risk) | `description`, `comments`, `tags`, `custom_fields` | Applied directly. |
-| High-risk | `status`, `role`, `site`, `rack`, `prefix`, `address` | Require approval. |
-| Everything else | — | **Denied.** |
+| 允许（低风险） | `description`、`comments`、`tags`、`custom_fields` | 直接应用。 |
+| 高风险 | `status`、`role`、`site`、`rack`、`prefix`、`address` | 需要审批。 |
+| 其它一切 | — | **拒绝。** |
 
-## How a plan is evaluated
+## plan 如何被评估
 
-When you create a plan, every field in `--set` is classified:
+当你创建一个 plan 时，`--set` 里的每个字段都会被分类：
 
-1. If **any** field is denied → the whole plan is rejected with
-   `error.kind = "policy_denied"`. Nothing is stored.
-2. Otherwise, if **any** field is high-risk → the plan's risk level is `high` and it
-   enters `pending_approval`.
-3. Otherwise → the plan's risk level is `low` and it is `planned`, ready to apply.
+1. 只要**任一**字段被拒绝 → 整个 plan 被拒，返回 `error.kind = "policy_denied"`，
+   不存储任何东西。
+2. 否则，只要**任一**字段是高风险 → 该 plan 的风险等级为 `high`，进入
+   `pending_approval`。
+3. 否则 → 该 plan 风险等级为 `low`，状态为 `planned`，可直接应用。
 
-The decision is re-evaluated again at `apply` time against the *stored* changes
-(defense in depth), so a plan that somehow no longer satisfies policy will not be
-applied.
+在 `apply` 时，会再次针对*已存储*的 changes 重新评估（纵深防御），因此一个不再满足
+策略的 plan 不会被应用。
 
-## Actions
+## 动作
 
-Only the **`update`** action is permitted. `create`, `delete`, and `bulk_delete` are
-refused by the policy engine, and the [NetBox client](./architecture.md) only exposes
-`GET` and `PATCH` — there is no code path that can issue a `DELETE` or call an arbitrary
-endpoint.
+只允许 **`update`** 动作。`create`、`delete`、`bulk_delete` 都会被策略引擎拒绝，并且
+[NetBox 客户端](./architecture.md)只暴露 `GET` 与 `PATCH`——根本不存在能发出 `DELETE`
+或调用任意端点的代码路径。
 
-## Supported resource types
+## 支持的资源类型
 
-| Type | NetBox endpoint |
+| 类型 | NetBox 端点 |
 | --- | --- |
 | `device` | `dcim/devices` |
 | `interface` | `dcim/interfaces` |
@@ -43,11 +40,10 @@ endpoint.
 | `prefix` | `ipam/prefixes` |
 | `vlan` | `ipam/vlans` |
 
-A resource type outside this set is rejected before any network call is made.
+不在此集合内的资源类型，会在任何网络调用之前就被拒绝。
 
-## Inspecting policy at runtime
+## 运行时查看策略
 
-- `nbx-guard help` lists the allowed and high-risk fields and the supported resource
-  types.
-- `nbx-guard inspect <type> <id>` returns the live resource annotated with the policy so
-  an agent can see, per resource, which fields it is allowed to propose.
+- `nbx-guard help` 列出允许字段、高风险字段以及支持的资源类型。
+- `nbx-guard inspect <type> <id>` 返回带有策略标注的实时资源，让 agent 能针对每个资源
+  看到自己被允许提议改动哪些字段。
