@@ -7,6 +7,7 @@ const Context = ctxmod.Context;
 const Store = @import("store.zig").Store;
 const ids = @import("ids.zig");
 const policy = @import("policy.zig");
+const schema = @import("schema.zig");
 const plan = @import("plan.zig");
 const approval = @import("approval.zig");
 const backup = @import("backup.zig");
@@ -38,6 +39,8 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
         return cmdGet(ctx, rest, "get");
     } else if (eq(cmd, "inspect")) {
         return cmdGet(ctx, rest, "inspect");
+    } else if (eq(cmd, "describe")) {
+        return cmdDescribe(ctx, rest);
     } else if (eq(cmd, "plan")) {
         return cmdPlan(ctx, rest);
     } else if (eq(cmd, "approve")) {
@@ -97,6 +100,8 @@ fn printHelp(ctx: *Context) !void {
             "help                             Show this help",
             "get <type> <id>                  Read a NetBox resource (read-only)",
             "inspect <type> <id>              Read a resource annotated with field policy",
+            "describe [<type>] [--source options|openapi] [--refresh] [--offline]",
+            "                                 Self-describe a type: action, fields, I/O schema (live-synced to NetBox)",
             "plan <type> <id> --set k=v ...   Create a change plan (policy + risk checked)",
             "approve --plan <id> [--note x]   Approve a high-risk plan (binds plan_hash)",
             "reject --plan <id> [--note x]    Reject a plan so it can never be applied",
@@ -168,6 +173,364 @@ fn cmdGet(ctx: *Context, rest: []const [:0]const u8, comptime command: []const u
 }
 
 // ---------------------------------------------------------------------------
+// describe (per-type self-description; static schema + live NetBox sync)
+// ---------------------------------------------------------------------------
+
+const DescribeField = struct {
+    name: []const u8,
+    class: []const u8,
+    requires_approval: bool,
+    json_type: []const u8,
+    example: []const u8,
+    note: []const u8,
+    /// Live NetBox field metadata (type/choices/required/help_text), or null
+    /// when no live sync was performed.
+    netbox: ?std.json.Value = null,
+    /// Whether this governed field exists on the live NetBox model.
+    present_in_netbox: ?bool = null,
+};
+
+fn cmdDescribe(ctx: *Context, rest: []const [:0]const u8) !u8 {
+    var rtype: ?[]const u8 = null;
+    var offline = false;
+    var refresh = false;
+    var source: []const u8 = "options";
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (eq(a, "--offline")) {
+            offline = true;
+        } else if (eq(a, "--refresh")) {
+            refresh = true;
+        } else if (eq(a, "--source")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                source = rest[i];
+            }
+        } else if (std.mem.startsWith(u8, a, "--source=")) {
+            source = a["--source=".len..];
+        } else if (!std.mem.startsWith(u8, a, "-") and rtype == null) {
+            rtype = a;
+        }
+    }
+
+    if (!eq(source, "options") and !eq(source, "openapi")) {
+        try ctx.fail("describe", .{
+            .kind = .invalid_args,
+            .message = "unknown --source",
+            .next_action = "use --source options (default) or --source openapi",
+        });
+        return exit_client;
+    }
+
+    if (rtype == null) return describeCatalog(ctx);
+
+    const key = rtype.?;
+    const doc = schema.lookup(key) orelse return failUnknownType(ctx, "describe", key);
+
+    var fields: std.ArrayList(DescribeField) = .empty;
+    for (doc.low) |fname| {
+        const fd = schema.fieldDoc(fname) orelse continue;
+        try fields.append(ctx.arena, .{
+            .name = fname,
+            .class = "allowed",
+            .requires_approval = false,
+            .json_type = fd.json_type,
+            .example = fd.example,
+            .note = fd.note,
+        });
+    }
+    for (doc.high) |fname| {
+        const fd = schema.fieldDoc(fname) orelse continue;
+        try fields.append(ctx.arena, .{
+            .name = fname,
+            .class = "high_risk",
+            .requires_approval = true,
+            .json_type = fd.json_type,
+            .example = fd.example,
+            .note = fd.note,
+        });
+    }
+
+    var sync_status: []const u8 = "skipped";
+    var sync_detail: []const u8 = "no NETBOX_TOKEN; static schema only";
+    var source_desc: []const u8 = undefined;
+    var component: ?[]const u8 = null;
+    var cached: ?bool = null;
+    var fetched_at: ?i64 = null;
+    var writable: ?std.json.Value = null;
+    var missing: std.ArrayList([]const u8) = .empty;
+
+    if (offline) {
+        source_desc = "none (offline)";
+        sync_detail = "--offline given; static schema only";
+    } else if (eq(source, "openapi")) {
+        source_desc = "GET /api/schema/?format=json";
+        const store = Store.init(ctx);
+        switch (try loadOpenApi(ctx, store, refresh)) {
+            .unavailable => |d| {
+                sync_status = "unavailable";
+                sync_detail = d;
+            },
+            .ok => |loaded| {
+                cached = loaded.cached;
+                fetched_at = loaded.fetched_at;
+                if (openApiComponent(ctx.arena, loaded.value, doc.netbox_endpoint)) |cn| {
+                    component = cn;
+                    if (openApiProperties(loaded.value, cn)) |props| {
+                        writable = props;
+                        sync_status = "ok";
+                        sync_detail = if (loaded.cached)
+                            "merged NetBox OpenAPI PATCH schema (cached)"
+                        else
+                            "merged NetBox OpenAPI PATCH schema (fetched)";
+                    } else {
+                        sync_status = "unavailable";
+                        sync_detail = "OpenAPI component exposed no properties";
+                    }
+                } else {
+                    sync_status = "unavailable";
+                    sync_detail = "no PATCH request schema for this endpoint in OpenAPI";
+                }
+            },
+        }
+    } else {
+        source_desc = try std.fmt.allocPrint(ctx.arena, "OPTIONS /api/{s}/", .{doc.netbox_endpoint});
+        if (ctx.config.netbox_token != null) {
+            var client = netbox.Client.init(ctx);
+            defer client.deinit();
+            if (client.options(key)) |res| {
+                defer ctx.gpa.free(res.body);
+                if (res.ok) {
+                    const meta = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, res.body, .{ .allocate = .alloc_always }) catch
+                        std.json.Value{ .null = {} };
+                    if (netboxWritableFields(meta)) |w| {
+                        writable = w;
+                        sync_status = "ok";
+                        sync_detail = "merged live NetBox field metadata";
+                    } else {
+                        sync_status = "unavailable";
+                        sync_detail = "NetBox OPTIONS exposed no writable field metadata (token may lack write permission)";
+                    }
+                } else {
+                    sync_status = "unavailable";
+                    sync_detail = try std.fmt.allocPrint(ctx.arena, "NetBox OPTIONS returned HTTP {d}", .{res.status});
+                }
+            } else |err| {
+                sync_status = "unavailable";
+                sync_detail = @errorName(err);
+            }
+        }
+    }
+
+    if (writable) |w| {
+        for (fields.items) |*f| {
+            if (objGet(w, f.name)) |fm| {
+                f.netbox = fm;
+                f.present_in_netbox = true;
+            } else {
+                f.present_in_netbox = false;
+                try missing.append(ctx.arena, f.name);
+            }
+        }
+    }
+
+    const usage = try std.fmt.allocPrint(ctx.arena, "nbxg plan {s} <id> --set <field>=<value> ...", .{doc.key});
+    try ctx.ok("describe", .{
+        .resource_type = doc.key,
+        .netbox_endpoint = doc.netbox_endpoint,
+        .display = doc.display,
+        .summary = doc.summary,
+        .action = "update",
+        .denied_actions = &[_][]const u8{ "create", "delete", "bulk_delete" },
+        .default_policy = "deny: only the fields below are writable",
+        .fields = fields.items,
+        .input = .{
+            .command = "plan",
+            .usage = usage,
+            .value_parsing = .{
+                .string = "bare or quoted, e.g. description=\"edge router\"",
+                .json_array = "valid JSON array, e.g. tags='[\"core\"]'",
+                .json_object = "valid JSON object, e.g. custom_fields='{\"x\":1}'",
+                .note = "a value that parses as a JSON array/object is sent as JSON; otherwise it is a string",
+            },
+        },
+        .output = .{
+            .envelope = "{ ok, command, data, error }",
+            .plan_fields = &[_][]const u8{ "plan_id", "plan_hash", "resource_type", "resource_id", "action", "changes", "risk_level", "requires_approval", "status", "base_values" },
+            .note = "plan emits data.plan + data.evaluation; apply emits data.backup_id + data.applied",
+        },
+        .examples = doc.examples,
+        .netbox_sync = .{
+            .source_kind = source,
+            .status = sync_status,
+            .source = source_desc,
+            .detail = sync_detail,
+            .component = component,
+            .cached = cached,
+            .fetched_at = fetched_at,
+            .missing_in_netbox = missing.items,
+        },
+    });
+    return exit_ok;
+}
+
+fn describeCatalog(ctx: *Context) !u8 {
+    const Item = struct {
+        resource_type: []const u8,
+        netbox_endpoint: []const u8,
+        display: []const u8,
+        summary: []const u8,
+        low_fields: []const []const u8,
+        high_fields: []const []const u8,
+    };
+    var items: std.ArrayList(Item) = .empty;
+    for (schema.resources) |r| {
+        try items.append(ctx.arena, .{
+            .resource_type = r.key,
+            .netbox_endpoint = r.netbox_endpoint,
+            .display = r.display,
+            .summary = r.summary,
+            .low_fields = r.low,
+            .high_fields = r.high,
+        });
+    }
+    try ctx.ok("describe", .{
+        .principle = "Agent proposes intent; the CLI decides what is allowed.",
+        .action = "update",
+        .denied_actions = &[_][]const u8{ "create", "delete", "bulk_delete" },
+        .default_policy = "deny: only explicitly classified fields are writable",
+        .resource_types = items.items,
+        .next_action = "run `nbxg describe <type>` for a type's fields and its live NetBox schema",
+    });
+    return exit_ok;
+}
+
+/// Extract the writable-field metadata object from a NetBox `OPTIONS` response:
+/// `actions.PUT` (update) is preferred, falling back to `actions.POST`.
+fn netboxWritableFields(meta: std.json.Value) ?std.json.Value {
+    const root = switch (meta) {
+        .object => |o| o,
+        else => return null,
+    };
+    const actions = root.get("actions") orelse return null;
+    const actions_obj = switch (actions) {
+        .object => |o| o,
+        else => return null,
+    };
+    if (actions_obj.get("PUT")) |put| switch (put) {
+        .object => return put,
+        else => {},
+    };
+    if (actions_obj.get("POST")) |post| switch (post) {
+        .object => return post,
+        else => {},
+    };
+    return null;
+}
+
+/// Read a key from a JSON object value, or null if not an object / absent.
+fn objGet(v: std.json.Value, key: []const u8) ?std.json.Value {
+    return switch (v) {
+        .object => |o| o.get(key),
+        else => null,
+    };
+}
+
+/// How long a cached OpenAPI document is considered fresh (6 hours). The NetBox
+/// schema changes rarely (model/plugin changes), so this avoids refetching the
+/// multi-MB document on every `describe` while still picking up changes.
+const openapi_cache_ttl_s: i64 = 6 * 3600;
+
+/// Upper bound for the OpenAPI document we cache and read back. The base NetBox
+/// schema is ~11 MB; this leaves generous headroom for plugin-heavy instances.
+/// Read and write use the same bound so the cache can always be read back.
+const openapi_max_bytes: usize = 64 * 1024 * 1024;
+
+const LoadedSchema = union(enum) {
+    ok: struct { value: std.json.Value, cached: bool, fetched_at: i64 },
+    unavailable: []const u8,
+};
+
+/// Load the NetBox OpenAPI document, preferring a fresh on-disk cache under
+/// `<state_dir>/cache/`. Fetches from NetBox (and rewrites the cache) when the
+/// cache is missing, stale, unreadable, or `--refresh` was given. A read or
+/// parse failure of the cache is treated as a miss (fall through to refetch),
+/// never a hard error. Parsing uses the arena.
+fn loadOpenApi(ctx: *Context, store: Store, refresh: bool) !LoadedSchema {
+    const cache_rel = try store.path(&.{ "cache", "openapi-schema.json" });
+    const meta_rel = try store.path(&.{ "cache", "openapi-schema.fetched_at" });
+
+    if (!refresh) {
+        if (store.readAlloc(meta_rel) catch null) |mb| {
+            defer ctx.gpa.free(mb);
+            const fetched = std.fmt.parseInt(i64, std.mem.trim(u8, mb, " \t\r\n"), 10) catch 0;
+            const age = nsToSecs(ctx.nowNanos()) - fetched;
+            if (fetched > 0 and age >= 0 and age < openapi_cache_ttl_s) {
+                if (store.readAllocMax(cache_rel, openapi_max_bytes) catch null) |cb| {
+                    defer ctx.gpa.free(cb);
+                    if (std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, cb, .{ .allocate = .alloc_always })) |v| {
+                        return .{ .ok = .{ .value = v, .cached = true, .fetched_at = fetched } };
+                    } else |_| {}
+                }
+            }
+        }
+    }
+
+    if (ctx.config.netbox_token == null)
+        return .{ .unavailable = "no NETBOX_TOKEN and no fresh cache; cannot fetch OpenAPI schema" };
+
+    var client = netbox.Client.init(ctx);
+    defer client.deinit();
+    const res = client.schema() catch |err| return .{ .unavailable = @errorName(err) };
+    defer ctx.gpa.free(res.body);
+    if (!res.ok)
+        return .{ .unavailable = try std.fmt.allocPrint(ctx.arena, "NetBox /api/schema/ returned HTTP {d}", .{res.status}) };
+
+    const now_s = nsToSecs(ctx.nowNanos());
+    // Only persist a cache we can read back later (read and write share the cap).
+    if (res.body.len <= openapi_max_bytes) {
+        store.ensureSubdir(try store.path(&.{"cache"})) catch {};
+        store.writeBytes(cache_rel, res.body) catch {};
+        store.writeBytes(meta_rel, try std.fmt.allocPrint(ctx.arena, "{d}", .{now_s})) catch {};
+    }
+
+    const v = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, res.body, .{ .allocate = .alloc_always }) catch
+        return .{ .unavailable = "failed to parse NetBox OpenAPI schema" };
+    return .{ .ok = .{ .value = v, .cached = false, .fetched_at = now_s } };
+}
+
+/// Resolve the component-schema name for a type's PATCH request body, by walking
+/// `paths./api/<ep>/{id}/.patch.requestBody.content.application/json.schema.$ref`.
+/// Resolving dynamically avoids hardcoding NetBox's inconsistent component names
+/// (e.g. `PatchedWritableDeviceWithConfigContextRequest`).
+fn openApiComponent(arena: std.mem.Allocator, doc: std.json.Value, endpoint: []const u8) ?[]const u8 {
+    const path_key = std.fmt.allocPrint(arena, "/api/{s}/{{id}}/", .{endpoint}) catch return null;
+    const paths = objGet(doc, "paths") orelse return null;
+    const path_item = objGet(paths, path_key) orelse return null;
+    const patch = objGet(path_item, "patch") orelse return null;
+    const body = objGet(patch, "requestBody") orelse return null;
+    const content = objGet(body, "content") orelse return null;
+    const appjson = objGet(content, "application/json") orelse return null;
+    const sch = objGet(appjson, "schema") orelse return null;
+    const ref = objGet(sch, "$ref") orelse return null;
+    const ref_str = switch (ref) {
+        .string => |s| s,
+        else => return null,
+    };
+    const slash = std.mem.lastIndexOfScalar(u8, ref_str, '/') orelse return null;
+    return ref_str[slash + 1 ..];
+}
+
+/// The `properties` object of a named component schema, or null.
+fn openApiProperties(doc: std.json.Value, component: []const u8) ?std.json.Value {
+    const components = objGet(doc, "components") orelse return null;
+    const schemas = objGet(components, "schemas") orelse return null;
+    const comp = objGet(schemas, component) orelse return null;
+    return objGet(comp, "properties");
+}
+
+// ---------------------------------------------------------------------------
 // plan
 // ---------------------------------------------------------------------------
 
@@ -176,7 +539,7 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
         try ctx.fail("plan", .{
             .kind = .invalid_args,
             .message = "expected <type> <id> --set field=value ...",
-            .next_action = "example: nbxg plan device 1 --set description=\"edge router\"",
+            .next_action = "see `nbxg describe <type>` for fields; example: nbxg plan device 1 --set description=\"edge router\"",
         });
         return exit_client;
     }
@@ -786,7 +1149,7 @@ fn failUnknownType(ctx: *Context, command: []const u8, rtype: []const u8) !u8 {
     try ctx.fail(command, .{
         .kind = .invalid_args,
         .message = "unknown resource type",
-        .next_action = "use one of: device, interface, ip-address, prefix, vlan",
+        .next_action = "run `nbxg describe` to list types; one of: device, interface, ip-address, prefix, vlan",
     });
     return exit_client;
 }

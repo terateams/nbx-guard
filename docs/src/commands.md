@@ -8,6 +8,8 @@ nbxg version                          打印版本与当前生效配置
 nbxg help                             显示帮助
 nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并标注字段策略
+nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
+                                      自描述：可写字段 / 输入输出 schema，实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
 nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
 nbxg reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）
@@ -35,6 +37,41 @@ nbxg list <plans|approvals|backups>   列出本地状态
 
 与 `get` 类似，但在响应中标注字段策略（`allowed_fields`、`high_risk_fields`），让 agent
 能看到自己可以提议哪些字段。需要 token。
+
+## `describe [<type>] [--source options|openapi] [--refresh] [--offline]`
+
+**自描述**：让 agent 在动手前了解「某类型能改什么、输入输出 schema 是什么」，并把字段元数据
+**实时对齐真实 NetBox**。
+
+- 不带 `<type>`：列出全部受治理的资源类型及其低/高风险字段（**离线，无需 token**）。
+- 带 `<type>`：返回该类型的 `action`、可写 `fields`（`name`/`class`/`json_type`/示例/是否需审批/
+  实时 `netbox` 元数据）、`input`（如何写 `--set`）、`output`（信封与 plan 字段）、`examples`，
+  并在 `netbox_sync` 下附带本次同步结果。
+
+### 同步来源 `--source`
+
+| 来源 | 取数方式 | 适用 | 说明 |
+|---|---|---|---|
+| `options`（默认） | `OPTIONS /api/<endpoint>/` | token 具写权限 | 轻量（约 32KB/类型），`choices` 带 `display_name` |
+| `openapi` | `GET /api/schema/?format=json` | 只读 token 亦可 | NetBox 官方 OpenAPI 描述文件，权威；整份约 10MB，**本地缓存 6 小时** |
+
+- `--refresh`：忽略缓存强制重新抓取。
+- `--offline`：跳过实时同步，仅返回内置静态 schema（`netbox_sync.status = skipped`）。
+- `openapi` 来源缓存于 `<state_dir>/cache/openapi-schema.json`；`netbox_sync` 会带
+  `component`（动态解析出的 PATCH 组件名）、`cached`、`fetched_at`。
+
+### 漂移提示
+
+`netbox_sync.missing_in_netbox` 列出「内置策略收录、但当前 NetBox 上不存在」的字段——例如
+NetBox 4.2+ 的 `prefix` 用通用 `scope` 取代了直接的 `site`。agent 应**以 `describe` 的实时结果
+为准**来决定提议哪些字段。
+
+```sh
+nbxg describe                          # 列出所有类型（离线）
+nbxg describe device                   # 默认 OPTIONS 同步
+nbxg describe device --source openapi  # 用 OpenAPI 描述文件同步（只读 token 即可）
+nbxg describe device --offline         # 仅静态 schema
+```
 
 ## `plan <type> <id> --set field=value ...`
 

@@ -4,6 +4,7 @@ pub const config = @import("config.zig");
 pub const store = @import("store.zig");
 pub const ids = @import("ids.zig");
 pub const policy = @import("policy.zig");
+pub const schema = @import("schema.zig");
 pub const plan = @import("plan.zig");
 pub const approval = @import("approval.zig");
 pub const backup = @import("backup.zig");
@@ -17,6 +18,7 @@ test {
     _ = @import("store.zig");
     _ = @import("context.zig");
     _ = @import("policy.zig");
+    _ = @import("schema.zig");
     _ = @import("plan.zig");
     _ = @import("approval.zig");
     _ = @import("backup.zig");

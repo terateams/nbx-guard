@@ -35,6 +35,7 @@ Agent / LLM ──> nbxg CLI (Zig) ──> NetBox REST API
 - **可回滚**——任何已应用的变更都能从其备份恢复。
 - **无原始访问 / 无删除**——只允许 `update`；`delete` / `bulk_delete` / 原始 API 访问都不暴露。
 - **对 agent 友好的 JSON**——每条命令都打印一个信封，含 `ok`、`data`，以及携带 `kind`、`risk_level`、`next_action` 的 `error`。
+- **自描述（self-describe）**——`describe` 让 agent 在动手前了解每个类型能改什么、输入输出 schema，并把字段元数据实时对齐真实 NetBox（`OPTIONS` 或官方 `OpenAPI` 描述文件）。
 
 ## 构建与测试
 
@@ -108,6 +109,8 @@ nbxg version                          打印版本与当前生效配置
 nbxg help                             显示帮助
 nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并标注字段策略
+nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
+                                      自描述：可写字段 / 输入输出 schema，实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
 nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
 nbxg reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）

@@ -38,6 +38,12 @@ pub const Store = struct {
         return true;
     }
 
+    /// Create an arbitrary subdirectory tree under the state dir (e.g. `cache/`),
+    /// including any missing parents. Used for non-critical caches.
+    pub fn ensureSubdir(self: Store, rel: []const u8) !void {
+        try self.dir().createDirPath(self.ctx.io, rel);
+    }
+
     /// Advisory lock guarding all state mutations. Held for the duration of a
     /// mutating command so concurrent invocations serialize instead of racing
     /// (which could lose audit entries or double-apply). Released on `release`,
@@ -59,8 +65,15 @@ pub const Store = struct {
     }
 
     /// Read an entire file, or `null` if it does not exist. Caller owns memory.
+    /// Caps at 16 MB; use `readAllocMax` for larger payloads (e.g. schema cache).
     pub fn readAlloc(self: Store, rel: []const u8) !?[]u8 {
-        return self.dir().readFileAlloc(self.ctx.io, rel, self.ctx.gpa, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+        return self.readAllocMax(rel, 16 * 1024 * 1024);
+    }
+
+    /// Like `readAlloc` but with a caller-specified maximum size. Returns
+    /// `error.StreamTooLong` if the file exceeds `max_bytes`.
+    pub fn readAllocMax(self: Store, rel: []const u8, max_bytes: usize) !?[]u8 {
+        return self.dir().readFileAlloc(self.ctx.io, rel, self.ctx.gpa, .limited(max_bytes)) catch |err| switch (err) {
             error.FileNotFound => null,
             else => err,
         };

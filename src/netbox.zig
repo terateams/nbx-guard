@@ -70,24 +70,57 @@ pub const Client = struct {
         return self.request(.PATCH, resource_type, id, body);
     }
 
+    /// `OPTIONS` the collection endpoint to retrieve DRF field metadata
+    /// (types, choices, required, help_text) for the live NetBox instance.
+    /// Used by `describe` to keep the reported schema in sync with NetBox.
+    pub fn options(self: *Client, resource_type: []const u8) !Result {
+        return self.request(.OPTIONS, resource_type, null, null);
+    }
+
+    /// Fetch the instance's OpenAPI 3.0 description (`/api/schema/?format=json`).
+    /// This is the canonical, complete API contract drf-spectacular generates;
+    /// `describe --source openapi` uses it (cached) as an alternative to OPTIONS.
+    /// Note: the document is large (multiple MB), hence the caller caches it.
+    pub fn schema(self: *Client) !Result {
+        const url = try std.fmt.allocPrint(self.ctx.arena, "{s}/api/schema/?format=json", .{self.ctx.config.netbox_url});
+        return self.send(.GET, url, null, false);
+    }
+
     fn request(
         self: *Client,
         method: std.http.Method,
         resource_type: []const u8,
-        id: []const u8,
+        id: ?[]const u8,
         payload: ?[]const u8,
     ) !Result {
         const ep = endpoint(resource_type) orelse return Error.UnknownResourceType;
-        const token = self.ctx.config.netbox_token orelse return Error.MissingToken;
         const arena = self.ctx.arena;
 
-        const url = try std.fmt.allocPrint(arena, "{s}/api/{s}/{s}/", .{ self.ctx.config.netbox_url, ep, id });
+        const url = if (id) |rid|
+            try std.fmt.allocPrint(arena, "{s}/api/{s}/{s}/", .{ self.ctx.config.netbox_url, ep, rid })
+        else
+            try std.fmt.allocPrint(arena, "{s}/api/{s}/", .{ self.ctx.config.netbox_url, ep });
+
+        return self.send(method, url, payload, true);
+    }
+
+    fn send(
+        self: *Client,
+        method: std.http.Method,
+        url: []const u8,
+        payload: ?[]const u8,
+        want_branch: bool,
+    ) !Result {
+        const token = self.ctx.config.netbox_token orelse return Error.MissingToken;
+        const arena = self.ctx.arena;
         const auth = try authHeader(arena, token);
 
         var extra: std.ArrayList(std.http.Header) = .empty;
         try extra.append(arena, .{ .name = "Accept", .value = "application/json" });
-        if (activeBranch(self.ctx.config)) |schema_id| {
-            try extra.append(arena, .{ .name = "X-NetBox-Branch", .value = schema_id });
+        if (want_branch) {
+            if (activeBranch(self.ctx.config)) |schema_id| {
+                try extra.append(arena, .{ .name = "X-NetBox-Branch", .value = schema_id });
+            }
         }
 
         // Establish the connection with a bounded timeout so an unreachable

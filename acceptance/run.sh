@@ -197,6 +197,48 @@ check "inspect: ok=true" "$(j '.ok')" "true"
 check "inspect: 暴露 allowed_fields(description)" \
   "$(j '.data.policy.allowed_fields | index("description") != null')" "true"
 
+# 4b) describe（自描述：静态 schema + 实时 NetBox 同步）
+guard describe
+check "describe(目录): ok=true" "$(j '.ok')" "true"
+check "describe(目录): 含 ip-address 类型" \
+  "$(j '.data.resource_types | map(.resource_type) | index("ip-address") != null')" "true"
+
+guard describe ip-address
+check "describe ip-address: ok=true" "$(j '.ok')" "true"
+check "describe ip-address: action=update" "$(j '.data.action')" "update"
+check "describe ip-address: status 为 high_risk" \
+  "$(j '.data.fields[] | select(.name=="status") | .class')" "high_risk"
+check "describe ip-address: 实时同步 status=ok" "$(j '.data.netbox_sync.status')" "ok"
+check "describe ip-address: status 已对齐 NetBox" \
+  "$(j '.data.fields[] | select(.name=="status") | .present_in_netbox')" "true"
+check "describe ip-address: status 暴露 NetBox 元数据" \
+  "$(j '.data.fields[] | select(.name=="status") | .netbox != null')" "true"
+check "describe ip-address: status 暴露 NetBox choices" \
+  "$(j '.data.fields[] | select(.name=="status") | .netbox.choices != null')" "true"
+check "describe ip-address: 无漂移字段" \
+  "$(j '.data.netbox_sync.missing_in_netbox | length')" "0"
+
+guard describe ip-address --offline
+check "describe --offline: 跳过实时同步" "$(j '.data.netbox_sync.status')" "skipped"
+
+# 4c) describe --source openapi（用 NetBox OpenAPI 描述文件作为同步来源）
+guard describe device --source openapi
+check "describe --source openapi: ok=true" "$(j '.ok')" "true"
+check "describe --source openapi: source_kind=openapi" \
+  "$(j '.data.netbox_sync.source_kind')" "openapi"
+check "describe --source openapi: 同步 status=ok" "$(j '.data.netbox_sync.status')" "ok"
+check "describe --source openapi: 动态解析出 component" \
+  "$(j '.data.netbox_sync.component != null')" "true"
+check "describe --source openapi: status 暴露 NetBox enum" \
+  "$(j '.data.fields[] | select(.name=="status") | .netbox.enum != null')" "true"
+check "describe --source openapi: 无漂移字段" \
+  "$(j '.data.netbox_sync.missing_in_netbox | length')" "0"
+
+# 第二次调用应命中本地缓存（cached=true），避免重复抓取数 MB 的 schema
+guard describe vlan --source openapi
+check "describe --source openapi: 复用磁盘缓存 cached=true" \
+  "$(j '.data.netbox_sync.cached')" "true"
+
 # 5) token 门禁：不带 token 的 get 应被拒
 guard_notoken get ip-address "$IP_ID"
 check "无 token get: 退出码 3" "$GRC" "3"

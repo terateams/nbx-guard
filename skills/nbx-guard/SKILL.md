@@ -16,6 +16,7 @@ description: >-
 ## 何时使用
 
 - 读取 NetBox 资源（只读）：`get` / `inspect`。
+- 了解某类型能改什么、输入输出 schema（实时对齐 NetBox）：`describe`。
 - 修改受支持资源的受控字段：走 `plan → (approve) → apply` 流程。
 - 出错或改坏了：用 `restore` 从变更前备份回滚。
 - 查看做过什么：`audit` / `list`。
@@ -68,6 +69,8 @@ nbxg version                          打印版本与当前生效配置（无需
 nbxg help                             机器可读的帮助（命令/字段/环境变量）
 nbxg get <type> <id>                  读取资源（只读）
 nbxg inspect <type> <id>              读取资源并对每个字段标注策略类别
+nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
+                                      自描述：列出可写字段 / 输入输出 schema，并实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险 + 漂移基线）
 nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
 nbxg reject  --plan <id> [--note x]   驳回一个 plan（之后 apply 会被拒）
@@ -101,7 +104,43 @@ nbxg plan vlan   10 --set custom_fields='{"x":1}'    # JSON 对象
 
 ---
 
-## 响应协议（每条命令输出一个 JSON 对象）
+## 自描述（describe）—— Agent 先问再做
+
+`describe` 让 Agent 在动手前先了解「这个类型能做什么、输入输出长什么样」，并把字段元数据
+**实时对齐真实 NetBox**，避免凭空猜字段或用过期的取值。
+
+- `nbxg describe`：列出全部受治理的资源类型及其低/高风险字段（**离线、无需 token**）。
+- `nbxg describe <type>`：给出该类型的 `action`、可写 `fields`（含 `json_type`/示例/是否需审批）、
+  `input`（怎么写 `--set`）、`output`（信封与 plan 字段）、`examples`，并在 `netbox_sync`
+  下附带实时同步结果。
+
+### 两种同步来源（`--source`）
+
+| 来源 | 取数方式 | 适用 | 说明 |
+|---|---|---|---|
+| `options`（默认） | `OPTIONS /api/<endpoint>/` | token 具备写权限 | 轻量（约 32KB/类型），`choices` 带 `display_name`，结构化最佳 |
+| `openapi` | `GET /api/schema/?format=json` | 只读 token 也可用 | NetBox 官方 OpenAPI 描述文件，权威；整份约 10MB，**本地缓存 6 小时** |
+
+- `--refresh`：强制重新抓取（忽略缓存）。
+- `--offline`：完全跳过实时同步，仅返回内置静态 schema（`netbox_sync.status = skipped`）。
+- `openapi` 来源会把 schema 缓存到 `<state_dir>/cache/openapi-schema.json`，`netbox_sync`
+  里会带 `component`（动态解析出的 PATCH 组件名）、`cached`、`fetched_at`。
+
+### 漂移提示
+
+`netbox_sync.missing_in_netbox` 列出「内置策略收录、但当前 NetBox 上不存在」的字段。
+例如 NetBox 4.2+ 的 `prefix` 用通用 `scope` 取代了直接的 `site`，对应版本上 `describe prefix`
+就不会再列出 `site`。Agent 应**以 `describe` 的实时结果为准**来决定提议哪些字段。
+
+```sh
+nbxg describe                          # 列出所有类型（离线）
+nbxg describe device                   # 默认 OPTIONS 同步
+nbxg describe device --source openapi  # 用 OpenAPI 描述文件同步（只读 token 即可）
+nbxg describe device --offline         # 仅静态 schema
+```
+
+**Agent 用法**：在 `plan` 之前先 `describe <type>`，按返回的字段名、`json_type`、`choices`/`enum`
+组织 `--set`，可显著降低 `policy_denied` 与 NetBox 校验失败。
 
 成功：
 
@@ -140,6 +179,14 @@ nbxg plan vlan   10 --set custom_fields='{"x":1}'    # JSON 对象
 ---
 
 ## 标准工作流
+
+### 0) 先自描述（推荐）
+
+```sh
+nbxg describe ip-address --source openapi
+#  -> data.fields[].name/json_type/class、data.netbox_sync.status:"ok"
+#     按返回的字段与 choices/enum 组织下面的 --set，减少 policy_denied / 校验失败
+```
 
 ### 1) 低风险变更（直接应用）
 
