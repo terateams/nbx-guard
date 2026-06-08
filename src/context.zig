@@ -11,6 +11,8 @@ pub const ErrKind = enum {
     invalid_field,
     needs_approval,
     not_approved,
+    not_found,
+    ambiguous,
     plan_not_found,
     approval_not_found,
     backup_not_found,
@@ -73,6 +75,28 @@ pub const Context = struct {
         try s.write(command);
         try s.objectField("data");
         try s.write(null);
+        try s.objectField("error");
+        try s.write(err);
+        try s.endObject();
+        try self.out.writeByte('\n');
+        try self.flush();
+    }
+
+    /// Emit a failure envelope that still carries a `data` payload:
+    /// `{ ok:false, command, data, error }`. Used when the command failed to
+    /// produce a single deterministic answer yet has actionable context for the
+    /// caller to act on — e.g. `resolve` finding several candidates (ambiguous):
+    /// the non-ok status stops naive `&&` chains while the candidate list tells
+    /// the agent exactly what it must choose between.
+    pub fn failData(self: *const Context, command: []const u8, err: GuardError, data: anytype) !void {
+        var s: std.json.Stringify = .{ .writer = self.out, .options = .{ .whitespace = .indent_2 } };
+        try s.beginObject();
+        try s.objectField("ok");
+        try s.write(false);
+        try s.objectField("command");
+        try s.write(command);
+        try s.objectField("data");
+        try s.write(data);
         try s.objectField("error");
         try s.write(err);
         try s.endObject();

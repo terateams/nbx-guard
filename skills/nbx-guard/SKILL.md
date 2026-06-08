@@ -3,7 +3,8 @@ name: nbx-guard
 description: >-
   通过 nbxg CLI 安全地读取、发现与变更 NetBox（DCIM/IPAM/Tenancy）。当需要查看、搜索或修改 NetBox 中的
   device / interface / ip-address / prefix / vlan / contact（如改 description、status、role、
-  site、address、phone、email 等字段），或需要先发现资源 id（list-resources/search）、受控的
+  site、address、phone、email 等字段），或需要先发现资源 id（list-resources/search，或用 resolve
+  把名称/slug/address 解析为 id）、受控的
   「计划→审批→应用→回滚」变更流程、字段级默认拒绝、变更前备份与审计时使用本技能。Agent 只提出变更意图，由 nbxg 决定是否放行。
 ---
 
@@ -69,8 +70,8 @@ bash scripts/installer.sh
 > 类型/字段；**Agent 不要自行设置这些变量**。默认拒绝、内置高风险分类与全部工作流控制（plan/审批/
 > 备份/漂移/审计/还原）始终不变。遇到「类型/字段不在治理范围」时，应**提示人工算子**去配置，而不是绕过。
 
-> **算子配置文件**：上面三个治理扩展变量也可等价地写进 `~/.nbx-guard/config.json`
-> （`{ "extra_resources": {"site":"dcim/sites"}, "allowed_fields": ["serial"], "high_risk_fields": ["tenant"] }`），
+> **算子配置文件**：上面四个治理扩展变量也可等价地写进 `~/.nbx-guard/config.json`
+> （`{ "extra_resources": {"site":"dcim/sites"}, "allowed_fields": ["serial"], "high_risk_fields": ["tenant"], "read_sensitive_fields": ["serial"] }`），
 > 与环境变量取并集。**密钥（`NETBOX_TOKEN`）只走环境变量，绝不写进此文件。** 这同样是算子的职责，
 > Agent 不应创建或修改该文件。
 
@@ -86,6 +87,7 @@ nbxg get <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]  读取资
 nbxg inspect <type> <id> [--fields basic|all]  读取资源并标注读/写字段策略
 nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（默认 brief 只读）
 nbxg search <type> -q <text> [选项]   按 NetBox q 模糊搜索某类型的对象（发现 id）
+nbxg resolve <type> [--name|--slug|--address v | k=v]  人类可读标识 -> 对象 id（歧义返回候选列表，绝不静默挑选）
 nbxg export <type> [选项]             只读导出/快照匹配资源（含来源元数据，供评审/审计/对比）
 nbxg snapshot <type> <id> [--out p]   只读快照单个资源（含来源元数据）
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
@@ -115,15 +117,22 @@ nbxg list    <plans|approvals|backups>  列出本地状态
   `count`（总数）/`returned`（本页）/`has_more`（是否还有下一页）。
 - `nbxg search <type> -q <text>`：用 NetBox 通用 `q` 参数模糊搜索；`--query` / `--name` 是 `-q`
   的别名（即便类型没有 `name` 字段也可用）。
+- `nbxg resolve <type> --name|--slug|--address <v>`（或任意 `k=v`，如 `serial=SN-1`）：把一个**确切的**
+  人类可读标识解析为 id。这是确定性查询，结果只有三态：恰好 1 条 → `data.resolved.id`（`ok=true`）；
+  多条 → `error.kind=ambiguous` + `data.candidates[]`（退出码 2，**绝不替你挑一个**，必须自己选定一个 id）；
+  0 条 → `error.kind=not_found`（退出码 2）。已知准确名称/slug 时优先用 `resolve`；只有模糊关键词时才用 `search`。
 
 ```text
-nbxg search contact -q alice                 # 按文本找联系人，拿到 id
+nbxg resolve device --name edge-router       # 确切名称 -> 唯一 id
+nbxg resolve site --slug tokyo               # 确切 slug -> 唯一 id
+nbxg search contact -q alice                 # 只有关键词时用模糊搜索
 nbxg list-resources ip-address --filter status=active --limit 20
 nbxg get contact 3                           # 用上一步发现的 id 读取
 ```
 
-**Agent 用法**：需要对「某个名字/描述」的对象动手时，先 `search`/`list-resources` 拿到 `id`，
-再 `describe <type>` 确认可写字段，最后 `plan → apply`。除非确有需要，避免 `--all-fields`
+**Agent 用法**：需要对「某个名字/描述」的对象动手时——已知确切标识就 `resolve` 拿到唯一 `id`
+（歧义时按候选列表显式选定，**不要**盲猜），只有关键词就 `search`/`list-resources`；再
+`describe <type>` 确认可写字段，最后 `plan → apply`。除非确有需要，避免 `--all-fields`
 （返回面更大），优先用默认 `brief`。
 
 ---
@@ -278,7 +287,8 @@ nbxg describe device --offline         # 仅静态 schema
 ### 0) 发现 + 自描述（推荐）
 
 ```sh
-nbxg search ip-address -q 192.0.2          # 不知道 id 时先发现，拿到 data.results[].id
+nbxg resolve ip-address --address 192.0.2.10/32  # 已知确切标识 -> data.resolved.id（歧义会给候选列表，自己选定）
+nbxg search ip-address -q 192.0.2          # 只有模糊关键词时再用搜索，拿到 data.results[].id
 nbxg describe ip-address --source openapi
 #  -> data.fields[].name/json_type/class、data.netbox_sync.status:"ok"
 #     按返回的字段与 choices/enum 组织下面的 --set，减少 policy_denied / 校验失败
@@ -343,7 +353,8 @@ nbxg list backups               # 已存储的备份
 3. 遇 `conflict`（漂移）：重新 `get`/`inspect` 看现状，再决定是否重新 `plan`。
 4. 高风险变更在 `approve` 前停下，向人类申请审批。
 5. `apply` 后用 `get`/`inspect` 核对结果符合预期。
-6. 不知道 `id` 时先 `search`/`list-resources` 发现，不要凭空猜测 id。
+6. 不知道 `id` 时：已知确切名称/slug/address 用 `resolve`（歧义按候选列表显式选定），只有关键词用
+   `search`/`list-resources`——不要凭空猜测 id，也不要在 `resolve` 返回 `ambiguous` 时随便选一个。
 
 **不要**：
 

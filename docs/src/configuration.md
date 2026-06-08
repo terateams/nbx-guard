@@ -15,6 +15,7 @@
 | `NBX_GUARD_EXTRA_RESOURCES` | _（未设置）_ | 算子新增受治理类型（`类型=端点` 列表）。详见[策略](./policy.md#算子扩展默认拒绝之外的显式放行)。 |
 | `NBX_GUARD_ALLOWED_FIELDS` | _（未设置）_ | 算子追加的低风险可写字段（逗号/空格分隔）。 |
 | `NBX_GUARD_HIGH_RISK_FIELDS` | _（未设置）_ | 算子追加的高风险字段（写入需审批）。 |
+| `NBX_GUARD_READ_SENSITIVE_FIELDS` | _（未设置）_ | 算子追加的读敏感字段（默认读取脱敏，整对象读取需 `approve-read`）。 |
 | `NBX_GUARD_CONFIG` | _（未设置）_ | 算子配置文件路径覆盖；默认 `~/.nbx-guard/config.json`。 |
 
 ## 布尔值解析
@@ -39,14 +40,16 @@ export NBX_GUARD_BRANCHING=0
 
 ```json
 {
-  "extra_resources":  { "site": "dcim/sites", "tenant": "tenancy/tenants" },
-  "allowed_fields":   ["serial", "asset_tag"],
-  "high_risk_fields": ["tenant"]
+  "extra_resources":      { "site": "dcim/sites", "tenant": "tenancy/tenants" },
+  "allowed_fields":       ["serial", "asset_tag"],
+  "high_risk_fields":     ["tenant"],
+  "read_sensitive_fields": ["serial"]
 }
 ```
 
-- 三个键分别等价于 `NBX_GUARD_EXTRA_RESOURCES` / `NBX_GUARD_ALLOWED_FIELDS` /
-  `NBX_GUARD_HIGH_RISK_FIELDS`，行为完全一致；文件与环境变量**取并集**（键冲突时环境变量优先）。
+- 四个键分别等价于 `NBX_GUARD_EXTRA_RESOURCES` / `NBX_GUARD_ALLOWED_FIELDS` /
+  `NBX_GUARD_HIGH_RISK_FIELDS` / `NBX_GUARD_READ_SENSITIVE_FIELDS`，行为完全一致；
+  文件与环境变量**取并集**（键冲突时环境变量优先）。
 - **只放治理扩展，密钥仍只走环境变量**：不要把 `NETBOX_URL` / `NETBOX_TOKEN` 写进此文件。
 - 文件不存在则静默跳过（向后兼容）；JSON 非法或 `NBX_GUARD_CONFIG` 指向的文件缺失 →
   以 `config_error`（退出码 3）失败。

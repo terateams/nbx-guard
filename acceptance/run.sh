@@ -222,7 +222,7 @@ echo "================ 验收用例 ================"
 guard version
 check "version: 退出码 0" "$GRC" "0"
 check "version: ok=true" "$(j '.ok')" "true"
-check "version: 版本号" "$(j '.data.version')" "0.5.0"
+check "version: 版本号" "$(j '.data.version')" "0.6.0"
 check "version: token_configured=true" "$(j '.data.token_configured')" "true"
 
 # 2) help
@@ -586,6 +586,88 @@ check "apply(漂移): error.kind=conflict" "$(j '.error.kind')" "conflict"
 check "apply(漂移): 未写入（NetBox 仍为外部值）" "$(nb_field '.description')" "changed-externally"
 guard list backups
 check "apply(漂移): 未新增备份记录" "$(j '.data.count')" "$BKP_BEFORE"
+
+# 4i) read-policy（读侧隐私分层：默认 basic 脱敏敏感字段；--fields all 需读审批；
+#     算子可经 config.json / env 的 read_sensitive_fields 追加敏感字段）
+CONTACT_ID=$(curl -fsS -X POST "$BASE/api/tenancy/contacts/" \
+  -H "$NB_AUTH" -H "Content-Type: application/json" \
+  -d '{"name":"Read Policy Contact","phone":"+1-555-0100","email":"rp@example.com"}' | jq -r '.id')
+[ -n "$CONTACT_ID" ] && [ "$CONTACT_ID" != "null" ] || { echo "❌ 创建 contact 失败" >&2; exit 3; }
+
+# 默认 basic：敏感字段被脱敏，无需审批
+guard get contact "$CONTACT_ID"
+check "read-policy get(默认): ok=true" "$(j '.ok')" "true"
+check "read-policy get(默认): field_profile=basic" "$(j '.data.read_policy.field_profile')" "basic"
+check "read-policy get(默认): phone 被脱敏" "$(j '.data.resource.phone')" "[redacted: read approval required]"
+check "read-policy get(默认): redacted_fields 含 phone" \
+  "$(j '.data.read_policy.redacted_fields | index("phone") != null')" "true"
+
+# --fields all 未审批：被读门禁拦截
+guard get contact "$CONTACT_ID" --fields all
+check "read-policy get(all 未审批): 退出码 2" "$GRC" "2"
+check "read-policy get(all 未审批): needs_approval" "$(j '.error.kind')" "needs_approval"
+
+# --fields all --plan-read：创建读计划（pending_approval）
+guard get contact "$CONTACT_ID" --fields all --plan-read
+check "read-policy plan-read: ok=true" "$(j '.ok')" "true"
+check "read-policy plan-read: action=read" "$(j '.data.plan.action')" "read"
+check "read-policy plan-read: status=pending_approval" "$(j '.data.plan.status')" "pending_approval"
+RPLAN=$(j '.data.plan.plan_id')
+
+# approve-read：人工审批读计划（绑定 plan_hash）
+guard approve-read --plan "$RPLAN" --note "acceptance read"
+check "read-policy approve-read: 退出码 0" "$GRC" "0"
+check "read-policy approve-read: plan_status=approved" "$(j '.data.plan_status')" "approved"
+
+# 凭已审批读计划披露完整对象：phone 还原为真实值
+guard get contact "$CONTACT_ID" --fields all --plan "$RPLAN"
+check "read-policy get(已审批 all): ok=true" "$(j '.ok')" "true"
+check "read-policy get(已审批 all): field_profile=all" "$(j '.data.read_policy.field_profile')" "all"
+check "read-policy get(已审批 all): phone 披露真实值" "$(j '.data.resource.phone')" "+1-555-0100"
+
+# config.json 的 read_sensitive_fields 扩展读敏感字段集（finding A：与 env 等价、取并集）
+mkdir -p "$STATE_DIR"
+cat > "$CFG_FILE" <<'JSON'
+{ "read_sensitive_fields": ["serial"] }
+JSON
+guard_cfgfile describe contact --offline
+check "read-policy cfg: sensitive_fields 含内置 phone" \
+  "$(j '.data.read_policy.sensitive_fields | index("phone") != null')" "true"
+check "read-policy cfg: sensitive_fields 含配置文件追加的 serial" \
+  "$(j '.data.read_policy.sensitive_fields | index("serial") != null')" "true"
+rm -f "$CFG_FILE" 2>/dev/null || true
+
+# 4j) resolve（人类可读标识 -> 对象 id；单一/未命中/歧义三态确定，绝不静默挑选）
+# 单一命中：按 address 精确解析到唯一 id
+guard resolve ip-address --address 192.0.2.10/24
+check "resolve(单一): ok=true" "$(j '.ok')" "true"
+check "resolve(单一): status=resolved" "$(j '.data.status')" "resolved"
+check "resolve(单一): resolved.id 命中 IP_ID" "$(j '.data.resolved.id')" "$IP_ID"
+check "resolve(单一): match_count=1" "$(j '.data.match_count')" "1"
+
+# 未命中：返回 not_found，退出码 2
+guard resolve ip-address --address 198.51.100.200/32
+check "resolve(未命中): 退出码 2" "$GRC" "2"
+check "resolve(未命中): error.kind=not_found" "$(j '.error.kind')" "not_found"
+
+# 歧义：多条命中只给候选列表，绝不静默挑选；退出码 2 阻断 && 链
+guard resolve ip-address --filter status=active
+check "resolve(歧义): 退出码 2" "$GRC" "2"
+check "resolve(歧义): error.kind=ambiguous" "$(j '.error.kind')" "ambiguous"
+check "resolve(歧义): status=ambiguous" "$(j '.data.status')" "ambiguous"
+check "resolve(歧义): match_count>=2" "$(j 'if .data.match_count >= 2 then "yes" else "no" end')" "yes"
+check "resolve(歧义): 给出候选列表" "$(j 'if (.data.candidates | length) >= 2 then "yes" else "no" end')" "yes"
+check "resolve(歧义): 不含 resolved（未静默挑选）" "$(j '.data | has("resolved")')" "false"
+
+# 算子扩展类型同样可解析（site 按 slug，复用 endpointFor 的扩展能力）
+guard_ext resolve site --slug acc-hq
+check "resolve(扩展类型 site): ok=true" "$(j '.ok')" "true"
+check "resolve(扩展类型 site): resolved.id 命中 SITE_ID" "$(j '.data.resolved.id')" "$SITE_ID"
+
+# 参数校验：缺少选择器
+guard resolve ip-address
+check "resolve(无选择器): 退出码 2" "$GRC" "2"
+check "resolve(无选择器): invalid_args" "$(j '.error.kind')" "invalid_args"
 
 # --- 汇总 ------------------------------------------------------------------
 echo ""

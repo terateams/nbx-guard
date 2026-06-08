@@ -39,15 +39,17 @@ pub const Config = struct {
 // governance extensions in a JSON file instead of exporting three env vars.
 //
 //     {
-//       "extra_resources":  { "site": "dcim/sites", "tenant": "tenancy/tenants" },
-//       "allowed_fields":   ["serial", "asset_tag"],
-//       "high_risk_fields": ["tenant"]
+//       "extra_resources":      { "site": "dcim/sites", "tenant": "tenancy/tenants" },
+//       "allowed_fields":       ["serial", "asset_tag"],
+//       "high_risk_fields":     ["tenant"],
+//       "read_sensitive_fields": ["serial"]
 //     }
 //
-// The file only *extends* governance (add types / writable fields); it never holds
-// secrets — NETBOX_URL / NETBOX_TOKEN stay in the environment. Values from the file
-// and the environment are unioned (env entries kept first so the env wins on any
-// extra_resources key conflict). Built-in classification always wins over both.
+// The file only *extends* governance (add types / writable fields / read-gated
+// fields); it never holds secrets — NETBOX_URL / NETBOX_TOKEN stay in the
+// environment. Values from the file and the environment are unioned (env entries
+// kept first so the env wins on any extra_resources key conflict). Built-in
+// classification always wins over both.
 
 /// Governance keys the config file can populate, in env-string syntax, so they can
 /// be unioned into the process environment and read by the existing env-driven
@@ -59,15 +61,19 @@ pub const ParsedExt = struct {
     allowed_fields: ?[]const u8 = null,
     /// comma-joined tokens for NBX_GUARD_HIGH_RISK_FIELDS (null = key absent).
     high_risk_fields: ?[]const u8 = null,
+    /// comma-joined tokens for NBX_GUARD_READ_SENSITIVE_FIELDS (null = key absent).
+    read_sensitive_fields: ?[]const u8 = null,
 
     pub fn isEmpty(self: ParsedExt) bool {
-        return self.extra_resources == null and self.allowed_fields == null and self.high_risk_fields == null;
+        return self.extra_resources == null and self.allowed_fields == null and
+            self.high_risk_fields == null and self.read_sensitive_fields == null;
     }
 };
 
 pub const env_extra_resources = "NBX_GUARD_EXTRA_RESOURCES";
 pub const env_allowed_fields = "NBX_GUARD_ALLOWED_FIELDS";
 pub const env_high_risk_fields = "NBX_GUARD_HIGH_RISK_FIELDS";
+pub const env_read_sensitive_fields = "NBX_GUARD_READ_SENSITIVE_FIELDS";
 
 /// Parse the operator config JSON into env-string fragments. Pure (no IO) so it is
 /// unit-testable. Unknown top-level keys are ignored; a wrong shape (non-object
@@ -91,6 +97,10 @@ pub fn parseExtJson(arena: std.mem.Allocator, bytes: []const u8) error{InvalidCo
     if (obj.get("high_risk_fields")) |v| {
         const s = try joinStringArray(arena, v);
         if (s.len > 0) out.high_risk_fields = s;
+    }
+    if (obj.get("read_sensitive_fields")) |v| {
+        const s = try joinStringArray(arena, v);
+        if (s.len > 0) out.read_sensitive_fields = s;
     }
     return out;
 }
@@ -144,7 +154,7 @@ fn joinStringArray(arena: std.mem.Allocator, v: std.json.Value) error{InvalidCon
     return buf.items;
 }
 
-/// Clone `base` (the process environment) and overlay the three governance keys
+/// Clone `base` (the process environment) and overlay the four governance keys
 /// with `union(env, file)` so the file extends — never replaces — the env. The
 /// returned map is allocated with `arena` (lives for the whole run). Env values
 /// are kept first so the env wins on any `extra_resources` key conflict.
@@ -154,6 +164,7 @@ pub fn mergeEnv(arena: std.mem.Allocator, base: *const Environ.Map, ext: ParsedE
     try overlayUnion(arena, m, env_extra_resources, ext.extra_resources);
     try overlayUnion(arena, m, env_allowed_fields, ext.allowed_fields);
     try overlayUnion(arena, m, env_high_risk_fields, ext.high_risk_fields);
+    try overlayUnion(arena, m, env_read_sensitive_fields, ext.read_sensitive_fields);
     return m;
 }
 
@@ -219,6 +230,7 @@ test "parseExtJson extracts governance keys in env syntax" {
         \\  "extra_resources": { "site": "dcim/sites", "tenant": "/tenancy/tenants/" },
         \\  "allowed_fields": ["serial", "asset_tag"],
         \\  "high_risk_fields": ["tenant"],
+        \\  "read_sensitive_fields": ["serial", "asset_tag"],
         \\  "unknown_key": 123
         \\}
     ;
@@ -226,6 +238,7 @@ test "parseExtJson extracts governance keys in env syntax" {
     try std.testing.expectEqualStrings("site=dcim/sites,tenant=tenancy/tenants", ext.extra_resources.?);
     try std.testing.expectEqualStrings("serial,asset_tag", ext.allowed_fields.?);
     try std.testing.expectEqualStrings("tenant", ext.high_risk_fields.?);
+    try std.testing.expectEqualStrings("serial,asset_tag", ext.read_sensitive_fields.?);
 }
 
 test "parseExtJson tolerates missing keys and empty object" {
@@ -256,7 +269,7 @@ test "parseExtJson treats empty collections as no-op" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const ext = try parseExtJson(a, "{ \"allowed_fields\": [], \"extra_resources\": {}, \"high_risk_fields\": [] }");
+    const ext = try parseExtJson(a, "{ \"allowed_fields\": [], \"extra_resources\": {}, \"high_risk_fields\": [], \"read_sensitive_fields\": [] }");
     try std.testing.expect(ext.isEmpty());
 }
 
@@ -273,6 +286,7 @@ test "mergeEnv unions file values with env, env first" {
         .extra_resources = "tenant=tenancy/tenants",
         .allowed_fields = "serial",
         .high_risk_fields = "primary_ip4",
+        .read_sensitive_fields = "serial",
     };
     const merged = try mergeEnv(a, &base, ext);
 
@@ -281,6 +295,7 @@ test "mergeEnv unions file values with env, env first" {
     try std.testing.expectEqualStrings("site=dcim/sites,tenant=tenancy/tenants", merged.get("NBX_GUARD_EXTRA_RESOURCES").?);
     // key absent in env -> file value used directly.
     try std.testing.expectEqualStrings("primary_ip4", merged.get("NBX_GUARD_HIGH_RISK_FIELDS").?);
+    try std.testing.expectEqualStrings("serial", merged.get("NBX_GUARD_READ_SENSITIVE_FIELDS").?);
     // base is untouched.
     try std.testing.expectEqualStrings("dns_name", base.get("NBX_GUARD_ALLOWED_FIELDS").?);
 }

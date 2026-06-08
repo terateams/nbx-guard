@@ -130,14 +130,16 @@ nbxg plan device 1 --set serial=NEW-SN-001   # 低风险，可直接 apply（自
 
 ```json
 {
-  "extra_resources":  { "site": "dcim/sites", "tenant": "tenancy/tenants" },
-  "allowed_fields":   ["serial", "asset_tag"],
-  "high_risk_fields": ["tenant"]
+  "extra_resources":      { "site": "dcim/sites", "tenant": "tenancy/tenants" },
+  "allowed_fields":       ["serial", "asset_tag"],
+  "high_risk_fields":     ["tenant"],
+  "read_sensitive_fields": ["serial"]
 }
 ```
 
-- 三个键分别等价于 `NBX_GUARD_EXTRA_RESOURCES` / `NBX_GUARD_ALLOWED_FIELDS` /
-  `NBX_GUARD_HIGH_RISK_FIELDS`；行为、fail-safe 约束、自描述一致性与环境变量**完全相同**。
+- 四个键分别等价于 `NBX_GUARD_EXTRA_RESOURCES` / `NBX_GUARD_ALLOWED_FIELDS` /
+  `NBX_GUARD_HIGH_RISK_FIELDS` / `NBX_GUARD_READ_SENSITIVE_FIELDS`；行为、fail-safe 约束、
+  自描述一致性与环境变量**完全相同**。
 - **只放治理扩展，不放密钥**：`NETBOX_URL` / `NETBOX_TOKEN` 仍只从环境变量读取，绝不写进此文件。
 - **文件与环境变量取并集**（都是增量放行）；`extra_resources` 键冲突时**环境变量优先**。
 - 路径解析：显式 `NBX_GUARD_CONFIG`（若设置但文件不存在 → `config_error`）→ 否则默认

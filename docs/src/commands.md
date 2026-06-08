@@ -12,6 +12,10 @@ nbxg get <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]
 nbxg inspect <type> <id> [--fields basic|all]  读取资源并标注读/写字段策略
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：可写字段 / 输入输出 schema，实时对齐 NetBox
+nbxg list-resources <type> [选项]     发现资源（brief 标识字段；只读）
+nbxg search <type> [-q text] [选项]   按文本/字段过滤搜索资源（只读）
+nbxg resolve <type> [--name|--slug|--address v | k=v]
+                                      人类可读标识 -> 对象 id（歧义返回候选列表，绝不静默挑选）
 nbxg export <type> [选项]             只读导出/快照匹配资源（含来源元数据）
 nbxg snapshot <type> <id> [--out p]   只读快照单个资源（含来源元数据）
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
@@ -125,7 +129,38 @@ nbxg search device -q core --filter status=active
 ```
 
 > 读取（`get`/`inspect`/`list-resources`/`search`）不触发审批；写入仍必须 `plan`。
-> 先用 `search`/`list-resources` 发现 `id`，再对该 `id` 走 `plan → apply`。
+> 先用 `resolve`/`search`/`list-resources` 发现 `id`，再对该 `id` 走 `plan → apply`。
+
+## `resolve <type> [选项]`
+
+把**人类可读标识**（`name` / `slug` / `address` / `display`，或任意 NetBox 字段）解析为
+后续命令（`get`/`inspect`/`plan`）所需的**对象 id**。这是一次确定性的、只读身份查询：
+请求 NetBox 的 `brief` 表示（仅 id/url/display 等标识字段，**绝不**包含读敏感字段），
+因此**无需读审批**。
+
+选择器（至少一个，多个之间是 AND 关系）：
+
+- `--name <v>` / `--slug <v>` / `--address <v>` / `--display <v>`：常用身份字段的便捷写法。
+- `--filter <k>=<v>` / 裸 `key=value` 位置参数：解析任意资源特有字段（如 `serial=...`、
+  `asset_tag=...`、`mac_address=...`、`vid=...`）。
+
+三种结果是**刻意确定**的，便于 agent 分支：
+
+| 命中数 | `ok` | 退出码 | 输出 |
+| --- | --- | --- | --- |
+| 恰好 1 | `true` | 0 | `data.status="resolved"`、`data.resolved.{id,display,url}` |
+| 多条 | `false` | 2 | `error.kind="ambiguous"`、`data.status="ambiguous"`、`data.candidates[]`（候选列表，**绝不静默挑选**） |
+| 0 条 | `false` | 2 | `error.kind="not_found"` |
+
+> 歧义时**不会**替你挑一个 id：非零退出码会中断 `&&` 链，候选列表告诉 agent 必须在
+> 哪些 id 之间做选择。请明确选定一个 id 后再继续。
+
+```sh
+nbxg resolve device --name edge-router      # 唯一命中 -> data.resolved.id
+nbxg resolve site --slug tokyo              # 按 slug 解析
+nbxg resolve ip-address --address 192.0.2.10/32
+nbxg resolve device serial=SN-12345         # 任意字段：裸 key=value
+```
 
 ## `export <type> [选项]`
 

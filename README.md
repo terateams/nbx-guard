@@ -145,6 +145,8 @@ nbxg get <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]
 nbxg inspect <type> <id> [--fields basic|all]  读取资源并标注读/写字段策略
 nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（brief 只读）
 nbxg search <type> -q <text> [选项]   按 NetBox q 模糊搜索某类型的对象
+nbxg resolve <type> [--name|--slug|--address v | k=v]
+                                      人类可读标识 -> 对象 id（歧义返回候选列表，绝不静默挑选）
 nbxg export <type> [选项]             只读导出/快照匹配资源（含来源元数据）
 nbxg snapshot <type> <id> [--out p]   只读快照单个资源（含来源元数据）
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]

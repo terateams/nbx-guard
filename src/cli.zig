@@ -16,7 +16,7 @@ const netbox = @import("netbox.zig");
 const doctor = @import("doctor.zig");
 const config = @import("config.zig");
 
-pub const version = "0.5.0";
+pub const version = "0.6.0";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
@@ -66,6 +66,8 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
         return cmdListResources(ctx, rest, false);
     } else if (eq(cmd, "search")) {
         return cmdListResources(ctx, rest, true);
+    } else if (eq(cmd, "resolve")) {
+        return cmdResolve(ctx, rest);
     } else if (eq(cmd, "export")) {
         return cmdExport(ctx, rest);
     } else if (eq(cmd, "snapshot")) {
@@ -179,6 +181,8 @@ fn printHelp(ctx: *Context) !void {
             "                                 Discover NetBox resources (brief identifying fields; low-risk read)",
             "search <type> [-q text] [--filter k=v] [--limit N] [--all-fields]",
             "                                 Search NetBox resources by fuzzy text / field filters (read-only)",
+            "resolve <type> [--name v] [--slug v] [--address v] [--display v] [k=v ...]",
+            "                                 Resolve human-readable identifiers to an object id (ambiguous => candidate list, never a silent pick)",
             "export <type> [--filter k=v] [-q text] [--fields basic|full] [--format json|jsonl] [--out path] [--limit N]",
             "                                 Read-only export/snapshot of matching resources with provenance metadata",
             "snapshot <type> <id> [--out path]",
@@ -1013,6 +1017,12 @@ fn cmdDescribe(ctx: *Context, rest: []const [:0]const u8) !u8 {
             .note = "plan emits data.plan + data.evaluation; apply emits data.backup_id + data.applied",
         },
         .examples = doc.examples,
+        .discovery = .{
+            .note = "plan / get / inspect operate on an object id; resolve a human-readable identifier to an id first",
+            .resolve = "nbxg resolve <type> --name|--slug|--address <value>  (deterministic; several matches => candidate list, never a silent pick)",
+            .search = "nbxg search <type> -q <text>  (fuzzy browse)",
+            .list = "nbxg list-resources <type>  (brief listing)",
+        },
         .read_policy = .{
             .tiers = &[_][]const u8{ "basic", "all" },
             .default = "basic",
@@ -1985,8 +1995,228 @@ fn cmdListResources(ctx: *Context, rest: []const [:0]const u8, is_search: bool) 
 }
 
 // ---------------------------------------------------------------------------
-// export / snapshot (read-only review & audit-evidence artifacts)
+// resolve (human-readable identifier -> object id, with ambiguity handling)
 // ---------------------------------------------------------------------------
+
+/// Map a human-readable identifier (name / slug / address / display / any
+/// NetBox field) to the object id that follow-up commands (get/inspect/plan)
+/// require. This is a deterministic, identity-only read: it requests NetBox's
+/// `brief` representation (id/url/display + identifying fields, never the
+/// sensitive read-policy fields), so it needs no read approval.
+///
+/// Outcomes are made unambiguous on purpose:
+///   - exactly one match  -> ok, `resolved` carries the id.
+///   - several matches     -> NOT ok (kind=ambiguous) WITH a `candidates`
+///                            list. The non-ok status stops naive `&&` chains;
+///                            the caller must pick an id, the CLI never does.
+///   - no match            -> NOT ok (kind=not_found).
+fn cmdResolve(ctx: *Context, rest: []const [:0]const u8) !u8 {
+    const command = "resolve";
+
+    var rtype: ?[]const u8 = null;
+    // Selectors are NetBox exact-match filters ("field=value"); kept both as a
+    // display list and folded into the query string below.
+    var selectors: std.ArrayList([]const u8) = .empty;
+
+    const Named = struct { flag: []const u8, field: []const u8 };
+    const named = [_]Named{
+        .{ .flag = "--name", .field = "name" },
+        .{ .flag = "--slug", .field = "slug" },
+        .{ .flag = "--address", .field = "address" },
+        .{ .flag = "--display", .field = "display" },
+    };
+
+    var i: usize = 0;
+    arg: while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        // Convenience flags for the common identity fields.
+        for (named) |n| {
+            if (eq(a, n.flag)) {
+                if (i + 1 < rest.len) {
+                    i += 1;
+                    try selectors.append(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}={s}", .{ n.field, rest[i] }));
+                }
+                continue :arg;
+            }
+            if (std.mem.startsWith(u8, a, n.flag) and a.len > n.flag.len and a[n.flag.len] == '=') {
+                try selectors.append(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}={s}", .{ n.field, a[n.flag.len + 1 ..] }));
+                continue :arg;
+            }
+        }
+        if (eq(a, "--field") or eq(a, "--filter")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                if (std.mem.indexOfScalar(u8, rest[i], '=') == null) return failResolveSelector(ctx, rest[i]);
+                try selectors.append(ctx.arena, rest[i]);
+            }
+            continue :arg;
+        }
+        if (std.mem.startsWith(u8, a, "--filter=")) {
+            const kv = a["--filter=".len..];
+            if (std.mem.indexOfScalar(u8, kv, '=') == null) return failResolveSelector(ctx, kv);
+            try selectors.append(ctx.arena, kv);
+            continue :arg;
+        }
+        // Generic positional `key=value` selector (covers resource-specific
+        // identity fields like serial / asset_tag / mac_address / vid / rd).
+        if (!std.mem.startsWith(u8, a, "-") and std.mem.indexOfScalar(u8, a, '=') != null) {
+            try selectors.append(ctx.arena, a);
+            continue :arg;
+        }
+        if (!std.mem.startsWith(u8, a, "-") and rtype == null) {
+            rtype = a;
+            continue :arg;
+        }
+        // Anything else (an unknown flag, or a bare positional that is neither
+        // the type nor a key=value) is rejected rather than silently ignored.
+        try ctx.fail(command, .{
+            .kind = .invalid_args,
+            .message = try std.fmt.allocPrint(ctx.arena, "unrecognized argument: {s}", .{a}),
+            .next_action = "use a selector flag (--name/--slug/--address/--display) or a key=value pair",
+        });
+        return exit_client;
+    }
+
+    const rt = rtype orelse {
+        try ctx.fail(command, .{
+            .kind = .invalid_args,
+            .message = "expected <type>",
+            .next_action = "example: nbxg resolve device --name edge-router",
+        });
+        return exit_client;
+    };
+
+    if (selectors.items.len == 0) {
+        try ctx.fail(command, .{
+            .kind = .invalid_args,
+            .message = "expected at least one selector",
+            .next_action = "example: nbxg resolve site --slug tokyo  (or device serial=ABC123)",
+        });
+        return exit_client;
+    }
+
+    const ep = netbox.endpointFor(ctx.env, rt) orelse return failUnknownType(ctx, command, rt);
+    if (ctx.config.netbox_token == null) return failNoToken(ctx, command);
+
+    // Identity lookup: a brief listing capped low enough to surface ambiguity
+    // but never to become a bulk read. `count` (below) still reflects the true
+    // total match count regardless of this cap.
+    const cap: u32 = 50;
+    var qs: std.ArrayList(u8) = .empty;
+    try appendU32Param(ctx.arena, &qs, "limit", cap);
+    try appendParam(ctx.arena, &qs, "brief", "true");
+    for (selectors.items) |s| {
+        const eqi = std.mem.indexOfScalar(u8, s, '=') orelse continue;
+        try appendParam(ctx.arena, &qs, s[0..eqi], s[eqi + 1 ..]);
+    }
+
+    var client = netbox.Client.init(ctx);
+    defer client.deinit();
+    const res = client.list(rt, qs.items) catch |err| return failNetboxConn(ctx, command, err);
+    defer ctx.gpa.free(res.body);
+    if (!res.ok) return failNetboxStatus(ctx, command, res);
+
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, res.body, .{}) catch
+        std.json.Value{ .null = {} };
+    var total: i64 = 0;
+    var results: []const std.json.Value = &.{};
+    switch (parsed) {
+        .object => |o| {
+            if (o.get("count")) |c| switch (c) {
+                .integer => |n| total = n,
+                else => {},
+            };
+            if (o.get("results")) |r| switch (r) {
+                .array => |arr| results = arr.items,
+                else => {},
+            };
+        },
+        else => {},
+    }
+
+    const query = .{
+        .resource_type = rt,
+        .netbox_endpoint = ep,
+        .selectors = selectors.items,
+    };
+
+    // No match: a clean, deterministic "nothing to operate on".
+    if (total == 0 or results.len == 0) {
+        try ctx.fail(command, .{
+            .kind = .not_found,
+            .message = try std.fmt.allocPrint(ctx.arena, "no {s} matches the given selector(s)", .{rt}),
+            .next_action = "broaden with `nbxg search <type> -q <text>`, or re-check the value",
+        });
+        return exit_client;
+    }
+
+    // Several matches: hand back the candidate list and refuse to choose.
+    if (total > 1) {
+        try ctx.failData(command, .{
+            .kind = .ambiguous,
+            .message = try std.fmt.allocPrint(ctx.arena, "{d} {s} objects match the given selector(s)", .{ total, rt }),
+            .next_action = "choose one id from candidates and pass it explicitly; the CLI will not pick for you",
+        }, .{
+            .resource_type = rt,
+            .netbox_endpoint = ep,
+            .query = query,
+            .status = "ambiguous",
+            .match_count = total,
+            .returned = @as(i64, @intCast(results.len)),
+            .truncated = total > @as(i64, @intCast(results.len)),
+            .candidates = results,
+        });
+        return exit_client;
+    }
+
+    // Exactly one match: resolve it.
+    const obj = results[0];
+    var id_val: ?i64 = null;
+    var display_val: ?[]const u8 = null;
+    var url_val: ?[]const u8 = null;
+    switch (obj) {
+        .object => |o| {
+            if (o.get("id")) |v| switch (v) {
+                .integer => |n| id_val = n,
+                else => {},
+            };
+            if (o.get("display")) |v| switch (v) {
+                .string => |s| display_val = s,
+                else => {},
+            };
+            if (o.get("url")) |v| switch (v) {
+                .string => |s| url_val = s,
+                else => {},
+            };
+        },
+        else => {},
+    }
+
+    try ctx.ok(command, .{
+        .resource_type = rt,
+        .netbox_endpoint = ep,
+        .query = query,
+        .status = "resolved",
+        .match_count = total,
+        .resolved = .{
+            .id = id_val,
+            .display = display_val,
+            .url = url_val,
+        },
+        .candidate = obj,
+        .next_action = "use the id with get / inspect / plan <type> <id>",
+    });
+    return exit_ok;
+}
+
+fn failResolveSelector(ctx: *Context, got: []const u8) !u8 {
+    try ctx.fail("resolve", .{
+        .kind = .invalid_args,
+        .message = try std.fmt.allocPrint(ctx.arena, "selector must be key=value, got: {s}", .{got}),
+        .next_action = "example: nbxg resolve device --filter serial=ABC123",
+    });
+    return exit_client;
+}
 
 /// Provenance metadata embedded in every export/snapshot artifact so it stays
 /// useful for later review, offline approval, and post-change comparison. The
