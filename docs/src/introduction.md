@@ -3,6 +3,10 @@
 **nbx-guard** 是一个面向 agent 的 [NetBox](https://netbox.dev/) 安全变更网关，
 使用 [Zig](https://ziglang.org/) 实现。
 
+<p align="center">
+  <img src="nbx-guard.png" alt="nbx-guard" width="720">
+</p>
+
 > **设计原则：** agent 只提出变更*意图*；究竟能不能做、怎么做，由 CLI 决定。
 
 nbx-guard 位于 LLM/agent 与 NetBox 之间。agent 永远无法直接调用 NetBox API——

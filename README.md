@@ -2,6 +2,10 @@
 
 **面向 agent 的 NetBox 安全变更网关，使用 Zig 实现。**
 
+<p align="center">
+  <img src="nbx-guard.png" alt="nbx-guard" width="720">
+</p>
+
 > 设计原则：**Agent 只提意图，CLI 决定能不能做。**
 > agent 只提出变更*意图*；究竟能不能做、怎么做，由 CLI 决定。
 
