@@ -5,7 +5,7 @@ const std = @import("std");
 const Context = @import("context.zig").Context;
 const Config = @import("config.zig").Config;
 
-pub const Error = error{ UnknownResourceType, MissingToken };
+pub const Error = error{ UnknownResourceType, MissingToken, UnsupportedContentEncoding };
 
 pub const Result = struct {
     status: u16,
@@ -108,6 +108,18 @@ pub const Client = struct {
 
     pub fn patch(self: *Client, resource_type: []const u8, id: []const u8, body: []const u8) !Result {
         return self.request(.PATCH, resource_type, id, body);
+    }
+
+    /// `POST` a new object to the collection endpoint. Used by `apply` for
+    /// `create` plans; NetBox returns the created object (including its new id).
+    pub fn create(self: *Client, resource_type: []const u8, body: []const u8) !Result {
+        return self.request(.POST, resource_type, null, body);
+    }
+
+    /// `DELETE` an object by id. Used by `restore` to roll back a create
+    /// (the rollback of a creation is deletion). NetBox returns 204 No Content.
+    pub fn delete(self: *Client, resource_type: []const u8, id: []const u8) !Result {
+        return self.request(.DELETE, resource_type, id, null);
     }
 
     /// `OPTIONS` the collection endpoint to retrieve DRF field metadata
@@ -217,9 +229,12 @@ pub const Client = struct {
 
         var resp: std.Io.Writer.Allocating = .init(self.ctx.gpa);
         defer resp.deinit();
+        // std.http advertises `Accept-Encoding: gzip, deflate`, so NetBox (or a
+        // reverse proxy / CDN in front of it) may return a compressed body.
+        // Decode it per the negotiated Content-Encoding before parsing JSON.
         var transfer_buffer: [4096]u8 = undefined;
-        const reader = response.reader(&transfer_buffer);
-        _ = reader.streamRemaining(&resp.writer) catch |err| switch (err) {
+        const transfer = response.reader(&transfer_buffer);
+        streamDecoded(arena, transfer, response.head.content_encoding, &resp.writer) catch |err| switch (err) {
             error.ReadFailed => return response.bodyErr().?,
             else => |e| return e,
         };
@@ -232,6 +247,30 @@ pub const Client = struct {
         };
     }
 };
+
+/// Stream an HTTP response body into `out`, decoding the negotiated
+/// `Content-Encoding`. `transfer` yields transfer-decoded (de-chunked) bytes
+/// that may still be compressed: std.http advertises
+/// `Accept-Encoding: gzip, deflate`, so the server may gzip- or deflate-encode
+/// the body. `scratch` provides the decompression window (freed on return).
+fn streamDecoded(
+    scratch: std.mem.Allocator,
+    transfer: *std.Io.Reader,
+    content_encoding: std.http.ContentEncoding,
+    out: *std.Io.Writer,
+) !void {
+    var window: []u8 = &.{};
+    defer if (window.len != 0) scratch.free(window);
+    switch (content_encoding) {
+        .identity => {},
+        .gzip, .deflate => window = try scratch.alloc(u8, std.compress.flate.max_window_len),
+        .zstd => window = try scratch.alloc(u8, std.compress.zstd.default_window_len),
+        .compress => return Error.UnsupportedContentEncoding,
+    }
+    var decompress: std.http.Decompress = undefined;
+    const reader = std.http.Decompress.init(&decompress, transfer, window, content_encoding);
+    _ = try reader.streamRemaining(out);
+}
 
 /// Prime `std.http.Client`'s TLS trust store so a TLS handshake driven through
 /// `connectTcpOptions` does not dereference a null `now`. `request()` normally
@@ -317,4 +356,37 @@ test "primeTlsTrust initializes the TLS validation clock" {
     // Idempotent: a second call leaves the already-initialized clock in place.
     try primeTlsTrust(&http, std.testing.io);
     try std.testing.expect(http.now != null);
+}
+
+test "streamDecoded decodes gzip and deflate response bodies" {
+    // Fixtures are the gzip and zlib(deflate) encodings of `want`; identity is
+    // passed through unchanged.
+    const gpa = std.testing.allocator;
+    const want = "{\"count\":1,\"results\":[{\"id\":7,\"name\":\"edge-1\"}]}";
+    const gzip_body = [_]u8{
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xab, 0x56, 0x4a, 0xce,
+        0x2f, 0xcd, 0x2b, 0x51, 0xb2, 0x32, 0xd4, 0x51, 0x2a, 0x4a, 0x2d, 0x2e, 0xcd, 0x29,
+        0x29, 0x56, 0xb2, 0x8a, 0xae, 0x56, 0xca, 0x4c, 0x51, 0xb2, 0x32, 0xd7, 0x51, 0xca,
+        0x4b, 0xcc, 0x4d, 0x55, 0xb2, 0x52, 0x4a, 0x4d, 0x49, 0x4f, 0xd5, 0x35, 0x54, 0xaa,
+        0x8d, 0xad, 0x05, 0x00, 0x99, 0x57, 0x19, 0x6a, 0x30, 0x00, 0x00, 0x00,
+    };
+    const deflate_body = [_]u8{
+        0x78, 0x9c, 0xab, 0x56, 0x4a, 0xce, 0x2f, 0xcd, 0x2b, 0x51, 0xb2, 0x32, 0xd4, 0x51,
+        0x2a, 0x4a, 0x2d, 0x2e, 0xcd, 0x29, 0x29, 0x56, 0xb2, 0x8a, 0xae, 0x56, 0xca, 0x4c,
+        0x51, 0xb2, 0x32, 0xd7, 0x51, 0xca, 0x4b, 0xcc, 0x4d, 0x55, 0xb2, 0x52, 0x4a, 0x4d,
+        0x49, 0x4f, 0xd5, 0x35, 0x54, 0xaa, 0x8d, 0xad, 0x05, 0x00, 0x7d, 0x05, 0x0f, 0x41,
+    };
+
+    const cases = [_]struct { ce: std.http.ContentEncoding, body: []const u8 }{
+        .{ .ce = .gzip, .body = &gzip_body },
+        .{ .ce = .deflate, .body = &deflate_body },
+        .{ .ce = .identity, .body = want },
+    };
+    for (cases) |c| {
+        var transfer: std.Io.Reader = .fixed(c.body);
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        try streamDecoded(gpa, &transfer, c.ce, &out.writer);
+        try std.testing.expectEqualStrings(want, out.written());
+    }
 }

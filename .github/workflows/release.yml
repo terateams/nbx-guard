@@ -66,6 +66,7 @@ jobs:
           cp README.md "pkg/${name}/"
           cp scripts/installer.sh "pkg/${name}/"
           cp skills/nbx-guard/SKILL.md "pkg/${name}/"
+          cp skills/nbx-guard/config.default.json "pkg/${name}/"
           if [[ "$target" == *windows* ]]; then
             (cd pkg && zip -r "../out/${name}.zip" "${name}")
           else

@@ -19,12 +19,14 @@ description: >-
 - 读取 NetBox 资源（只读）：`get` / `inspect`。
 - 了解某类型能改什么、输入输出 schema（实时对齐 NetBox）：`describe`。
 - 修改受支持资源的受控字段：走 `plan → (approve) → apply` 流程。
-- 出错或改坏了：用 `restore` 从变更前备份回滚。
+- 创建新对象（仅限算子已开启 `creatable_resources` 的类型）：走 `create → approve → apply`，每次创建都必须审批。
+- 出错或改坏了：用 `restore` 从变更前备份回滚（创建的回滚 = 删除该对象）。
 - 查看做过什么：`audit` / `list`。
 
 ## 何时**不要**使用
 
-- 创建或删除对象（`nbxg` 只允许 `update`，不提供 create/delete/bulk/raw）。
+- 删除已有对象（`nbxg` 不提供 delete/bulk/raw 作为 agent 动作；删除仅作为「创建」的回滚由 `restore` 内部执行）。
+- 创建算子未在 `creatable_resources` 里开启的类型（默认拒绝）。
 - 改动策略未收录的字段（默认拒绝，见下）。
 - 直接访问 NetBox REST API 绕过网关——这违背本技能的全部意义。
 
@@ -62,6 +64,7 @@ bash scripts/installer.sh
 | `NBX_GUARD_ALLOWED_FIELDS` | 否 | — | **算子专用**：追加低风险字段（逗号/空格分隔）。 |
 | `NBX_GUARD_HIGH_RISK_FIELDS` | 否 | — | **算子专用**：追加高风险字段（需审批）。 |
 | `NBX_GUARD_READ_SENSITIVE_FIELDS` | 否 | — | **算子专用**：追加读敏感字段（整对象读取需 `approve-read`）。Agent 不应设置。 |
+| `NBX_GUARD_CREATABLE_RESOURCES` | 否 | — | **算子专用**：开启 `create` 的类型（逗号/空格分隔，`*` 表示任意类型）。默认空=禁止创建；每次创建仍需审批。Agent 不应设置。 |
 | `NBX_GUARD_CONFIG` | 否 | `~/.nbx-guard/config.json` | **算子专用**：治理扩展配置文件路径覆盖。 |
 
 > token 绝不会被写入状态目录，也绝不会在输出里打印。`nbxg version` 只报告 `token_configured: true|false`。
@@ -70,10 +73,11 @@ bash scripts/installer.sh
 > 类型/字段；**Agent 不要自行设置这些变量**。默认拒绝、内置高风险分类与全部工作流控制（plan/审批/
 > 备份/漂移/审计/还原）始终不变。遇到「类型/字段不在治理范围」时，应**提示人工算子**去配置，而不是绕过。
 
-> **算子配置文件**：上面四个治理扩展变量也可等价地写进 `~/.nbx-guard/config.json`
-> （`{ "extra_resources": {"site":"dcim/sites"}, "allowed_fields": ["serial"], "high_risk_fields": ["tenant"], "read_sensitive_fields": ["serial"] }`），
+> **算子配置文件**：上面的治理扩展变量也可等价地写进 `~/.nbx-guard/config.json`
+> （`{ "extra_resources": {"site":"dcim/sites"}, "allowed_fields": ["serial"], "high_risk_fields": ["tenant"], "read_sensitive_fields": ["serial"], "creatable_resources": ["site"] }`），
 > 与环境变量取并集。**密钥（`NETBOX_TOKEN`）只走环境变量，绝不写进此文件。** 这同样是算子的职责，
-> Agent 不应创建或修改该文件。
+> Agent 不应创建或修改该文件。随技能安装的默认配置已登记全部 NetBox 类型并把
+> `creatable_resources` 设为 `["*"]`（创建仍逐次审批）。
 
 ---
 
@@ -93,6 +97,7 @@ nbxg snapshot <type> <id> [--fields basic|all] [--plan-read] [--plan <id>] [--ou
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：列出可写字段 / 输入输出 schema，并实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（策略 + 风险 + 漂移基线；全部同值 -> no_change 不建计划）
+nbxg create <type> --set k=v ...      创建新对象的计划（仅限算子开启的类型；始终需审批）
 nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
 nbxg approve-read --plan <id> [--note x]  审批一次敏感对象的整体读取（绑定 plan_hash）
 nbxg reject  --plan <id> [--note x]   驳回一个 plan（之后 apply 会被拒）
@@ -170,7 +175,7 @@ nbxg snapshot contact 7 --fields all --plan-read             # 创建读 plan（
 - **低风险（直接放行，无需审批）**：`description`、`comments`、`tags`、`custom_fields`、`title`、`phone`、`email`、`link`。
 - **高风险（必须经 `approve` 才能 apply）**：`status`、`role`、`site`、`rack`、`prefix`、`address`、`groups`。
 - **其它一切字段**：拒绝（`error.kind = policy_denied`）。
-- **动作**：仅允许 `update`；`create`/`delete`/`bulk_delete` 一律拒绝。
+- **动作**：`update` 走字段策略；`create` 仅对算子开启的类型放行且**始终需审批**（字段不做逐字段拒绝——新对象需要 `name`/`slug` 等标识字段）；`delete`/`bulk_delete` 不作为 agent 动作（删除仅作创建回滚由 `restore` 执行）。
 
 > **需要的字段被 `policy_denied`？** 不要反复重试，也不要自行设置 env 绕过。请**提示人工算子**用
 > `NBX_GUARD_ALLOWED_FIELDS`（低风险）或 `NBX_GUARD_HIGH_RISK_FIELDS`（需审批）放行该字段（例如设备
@@ -186,6 +191,28 @@ nbxg plan device 1 --set status=active               # 字符串 "active"
 nbxg plan device 1 --set tags='["core"]'             # JSON 数组
 nbxg plan vlan   10 --set custom_fields='{"x":1}'    # JSON 对象
 ```
+
+---
+
+## 创建对象（governed create）
+
+创建一个**新对象**走独立的 `create` 命令，治理点是**类型开关 + 强制审批 + 审计 + 可回滚**，而非逐字段拒绝：
+
+- **类型默认拒绝**：只有算子在 `creatable_resources`（`~/.nbx-guard/config.json`）/ `NBX_GUARD_CREATABLE_RESOURCES` 中开启的类型才能创建；`*` 表示任意已登记类型。随技能安装的默认配置已设为 `["*"]`。
+- **始终需审批**：`create` 生成的 plan 一律 `risk_level=high`、`requires_approval=true`、`status=pending_approval`——必须人工 `approve` 后才能 `apply`（POST）。
+- **不做逐字段拒绝**：新对象需要 `name`/`slug` 等标识字段，这些不在写允许清单内；字段原样透传给 NetBox，由 NetBox 校验必填/取值。请把每个 `--set` 都呈现给审批者。
+- **可回滚**：`apply` 成功后会记录一条 backup，其 `action=create`；`restore --backup <id>` 的回滚动作是**删除**刚创建的对象（NetBox 返回 204）。
+
+```text
+nbxg create site --set name=POP3 --set slug=pop3 --set status=active   # 生成 create plan（pending_approval）
+nbxg approve --plan plan_...                                            # 人工审批（绑定 plan_hash）
+nbxg apply   --plan plan_...                                            # POST 创建；data.resource_id 是新对象 id
+nbxg restore --backup bkp_...                                          # 如需撤销：删除刚创建的对象
+```
+
+> `create` 在生成 plan 时**不需要 token**（没有现状要读）；`apply` 才需要 token。被
+> `policy_denied` 表示该类型未开启——请**提示人工算子**把类型加入 `creatable_resources`（或 `*`），
+> Agent 不要自行设置 env / 自我审批。
 
 ---
 

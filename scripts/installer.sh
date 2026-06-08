@@ -40,6 +40,21 @@ ok()   { printf '%s✅ %s%s\n' "$C_OK" "$*" "$C_RST"; }
 warn() { printf '%s⚠️  %s%s\n' "$C_WARN" "$*" "$C_RST"; }
 die()  { printf '%s❌ %s%s\n' "$C_ERR" "$*" "$C_RST" >&2; exit 1; }
 
+# 解析真正的 rm：有些环境把 rm 包成"移入废纸篓"的 PATH shim，在自定义 HOME 下会
+# 因找不到废纸篓而失败并以 set -e 中断安装。用绝对路径的系统 rm 绕过它。
+REAL_RM=""
+for _rm in /bin/rm /usr/bin/rm; do
+  [ -x "$_rm" ] && { REAL_RM="$_rm"; break; }
+done
+# 尽力移除路径：优先真实 rm，失败也不致命（随后的 install 会覆盖同名文件）。
+hard_rm() {
+  if [ -n "$REAL_RM" ]; then
+    "$REAL_RM" -rf "$@" 2>/dev/null || true
+  else
+    rm -rf "$@" 2>/dev/null || true
+  fi
+}
+
 # 是否可交互（无 TTY 或设置 NBXG_ASSUME_YES 时走默认）
 ASSUME_YES="${NBXG_ASSUME_YES:-0}"
 is_interactive() { [ "$ASSUME_YES" != "1" ] && [ -t 0 ]; }
@@ -147,6 +162,35 @@ find_skill_md() {
   die "找不到 SKILL.md（在 $SELF_DIR 或 $REPO_ROOT/skills/${SKILL_NAME}/）"
 }
 
+# --- 定位默认算子配置 config.default.json（可选，缺失不致命）---------------
+find_default_config() {
+  local c
+  for c in "$SELF_DIR/config.default.json" "$REPO_ROOT/skills/${SKILL_NAME}/config.default.json"; do
+    [ -f "$c" ] && { printf '%s' "$c"; return; }
+  done
+  return 1
+}
+
+# --- 部署默认算子配置到 ~/.nbx-guard/config.json ---------------------------
+# 默认配置登记了全部 NetBox 资源类型，安装后开箱即可查询。绝不覆盖既有配置：
+# 若已存在且内容不同，则把最新默认另存为 config.json.default 供对比/合并。
+deploy_default_config() {
+  local src="$1"
+  local cfg_dir="$HOME/.nbx-guard"
+  local cfg="$cfg_dir/config.json"
+  mkdir -p "$cfg_dir" 2>/dev/null || { warn "无法创建 ${cfg_dir}，跳过默认配置"; return 0; }
+  if [ ! -f "$cfg" ]; then
+    install -m 0644 "$src" "$cfg"
+    ok "已写入默认算子配置：${cfg}（开箱即可查询全部 NetBox 资源类型）"
+  elif cmp -s "$src" "$cfg"; then
+    info "${C_DIM}算子配置已是最新默认：${cfg}${C_RST}"
+  else
+    install -m 0644 "$src" "${cfg}.default"
+    warn "已存在算子配置，未覆盖：${cfg}"
+    info "${C_DIM}最新默认另存为：${cfg}.default（如需新增资源类型可对比后合并）${C_RST}"
+  fi
+}
+
 # --- 3) 安装目录与重装确认 -------------------------------------------------
 main() {
   info "${C_DIM}nbxg 安装器 · 仓库 ${REPO_SLUG}${C_RST}"
@@ -161,7 +205,7 @@ main() {
   if [ -e "$target" ]; then
     warn "目标已存在：$target"
     if confirm "是否移除并重新安装？"; then
-      rm -rf "$target"
+      hard_rm "$target"
       ok "已移除旧安装"
     else
       die "已取消安装（保留现有目录）。"
@@ -178,6 +222,15 @@ main() {
   [ -f "$REPO_ROOT/README.md" ] && install -m 0644 "$REPO_ROOT/README.md" "$target/README.md" || true
   install -m 0755 "${BASH_SOURCE[0]}" "$target/installer.sh"
   ok "已安装技能到：$target"
+
+  # --- 默认算子配置（登记全部 NetBox 资源类型，可直接查询）---
+  local def_cfg; def_cfg="$(find_default_config || true)"
+  if [ -n "$def_cfg" ] && [ -f "$def_cfg" ]; then
+    install -m 0644 "$def_cfg" "$target/config.default.json"
+    deploy_default_config "$def_cfg"
+  else
+    warn "未随包提供 config.default.json，跳过默认配置（可手动创建 ~/.nbx-guard/config.json）"
+  fi
 
   # --- 尝试把 nbxg 暴露到 PATH（best-effort）---
   local linked=""
