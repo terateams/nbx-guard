@@ -46,6 +46,47 @@ pub fn envListHas(env: *const EnvMap, var_name: []const u8, name: []const u8) bo
     return false;
 }
 
+fn listHas(list: []const []const u8, name: []const u8) bool {
+    for (list) |x| if (std.mem.eql(u8, x, name)) return true;
+    return false;
+}
+
+/// The effective writable-field lists: built-in fields plus operator env
+/// additions. Mirrors `classifyFieldEnv` precedence so the self-description
+/// (`describe`/`inspect`/`help`) matches enforcement — built-in classification
+/// wins (a built-in field is never re-listed or downgraded), and an env
+/// high-risk entry beats an env allowed entry.
+pub const EffectiveFields = struct {
+    allowed: []const []const u8,
+    high_risk: []const []const u8,
+};
+
+pub fn effectiveFields(arena: std.mem.Allocator, env: *const EnvMap) !EffectiveFields {
+    var allowed: std.ArrayList([]const u8) = .empty;
+    var high: std.ArrayList([]const u8) = .empty;
+    try allowed.appendSlice(arena, &allowed_fields);
+    try high.appendSlice(arena, &high_risk_fields);
+    if (env.get("NBX_GUARD_HIGH_RISK_FIELDS")) |spec| {
+        var it = std.mem.tokenizeAny(u8, spec, ", \t");
+        while (it.next()) |tok| {
+            if (classifyField(tok) != .denied) continue;
+            if (!listHas(high.items, tok)) try high.append(arena, tok);
+        }
+    }
+    if (env.get("NBX_GUARD_ALLOWED_FIELDS")) |spec| {
+        var it = std.mem.tokenizeAny(u8, spec, ", \t");
+        while (it.next()) |tok| {
+            if (classifyField(tok) != .denied) continue;
+            if (listHas(high.items, tok)) continue;
+            if (!listHas(allowed.items, tok)) try allowed.append(arena, tok);
+        }
+    }
+    return .{
+        .allowed = try allowed.toOwnedSlice(arena),
+        .high_risk = try high.toOwnedSlice(arena),
+    };
+}
+
 pub const FieldVerdict = struct {
     field: []const u8,
     class: FieldClass,
@@ -168,4 +209,25 @@ test "operator env extends the allow-list without weakening defaults" {
 
     const denied_eval = try evaluateEnv(arena.allocator(), &env, &.{"name"});
     try testing.expectEqual(Decision.deny, denied_eval.decision);
+}
+
+test "effectiveFields surfaces env additions with built-in precedence" {
+    const a = testing.allocator;
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    // serial is env-low; status is built-in high but also listed as allowed (must stay high)
+    try env.put("NBX_GUARD_ALLOWED_FIELDS", "serial, status");
+    try env.put("NBX_GUARD_HIGH_RISK_FIELDS", "tenant");
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const ef = try effectiveFields(arena.allocator(), &env);
+
+    try testing.expect(listHas(ef.allowed, "description")); // built-in retained
+    try testing.expect(listHas(ef.allowed, "serial")); // env low surfaced
+    try testing.expect(!listHas(ef.allowed, "status")); // built-in high not duplicated into allowed
+    try testing.expect(listHas(ef.high_risk, "status")); // built-in high retained
+    try testing.expect(listHas(ef.high_risk, "tenant")); // env high surfaced
+    try testing.expect(!listHas(ef.high_risk, "serial")); // env low not in high
+    try testing.expect(!listHas(ef.allowed, "name")); // unlisted stays denied
 }

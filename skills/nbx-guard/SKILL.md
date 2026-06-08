@@ -126,6 +126,11 @@ nbxg get contact 3                           # 用上一步发现的 id 读取
 - **其它一切字段**：拒绝（`error.kind = policy_denied`）。
 - **动作**：仅允许 `update`；`create`/`delete`/`bulk_delete` 一律拒绝。
 
+> **需要的字段被 `policy_denied`？** 不要反复重试，也不要自行设置 env 绕过。请**提示人工算子**用
+> `NBX_GUARD_ALLOWED_FIELDS`（低风险）或 `NBX_GUARD_HIGH_RISK_FIELDS`（需审批）放行该字段（例如设备
+> `serial` 序列号）。放行后该字段会**自动出现在** `describe`/`inspect`/`help` 的字段清单中（并实时标注
+> `present_in_netbox`），你即可照常 `plan → apply`，无需改源码。
+
 `--set` 取值解析：默认按**字符串**；合法 JSON 的数组/对象按 JSON 解析。
 
 ```sh
