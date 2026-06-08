@@ -61,6 +61,91 @@ pub fn changeFields(arena: std.mem.Allocator, changes: std.json.Value) ![]const 
     return list;
 }
 
+/// Deep structural equality for two JSON values. Used to detect a no-op plan
+/// (every requested value already equals the current NetBox value). Numbers
+/// compare across integer/float representations; objects compare key sets and
+/// member values irrespective of key order.
+pub fn valueEqual(a: std.json.Value, b: std.json.Value) bool {
+    return switch (a) {
+        .null => switch (b) {
+            .null => true,
+            else => false,
+        },
+        .bool => |av| switch (b) {
+            .bool => |bv| av == bv,
+            else => false,
+        },
+        .integer => |av| switch (b) {
+            .integer => |bv| av == bv,
+            .float => |bv| @as(f64, @floatFromInt(av)) == bv,
+            else => false,
+        },
+        .float => |av| switch (b) {
+            .float => |bv| av == bv,
+            .integer => |bv| av == @as(f64, @floatFromInt(bv)),
+            else => false,
+        },
+        .number_string => |av| switch (b) {
+            .number_string => |bv| std.mem.eql(u8, av, bv),
+            else => false,
+        },
+        .string => |av| switch (b) {
+            .string => |bv| std.mem.eql(u8, av, bv),
+            else => false,
+        },
+        .array => |av| switch (b) {
+            .array => |bv| blk: {
+                if (av.items.len != bv.items.len) break :blk false;
+                for (av.items, bv.items) |x, y| {
+                    if (!valueEqual(x, y)) break :blk false;
+                }
+                break :blk true;
+            },
+            else => false,
+        },
+        .object => |av| switch (b) {
+            .object => |bv| blk: {
+                if (av.count() != bv.count()) break :blk false;
+                var it = av.iterator();
+                while (it.next()) |entry| {
+                    const other = bv.get(entry.key_ptr.*) orelse break :blk false;
+                    if (!valueEqual(entry.value_ptr.*, other)) break :blk false;
+                }
+                break :blk true;
+            },
+            else => false,
+        },
+    };
+}
+
+/// True when every field in `fields` has the same value in `requested` as in
+/// `current` — i.e. the requested update is a complete no-op. Both arguments are
+/// JSON objects keyed by field name; a missing key compares as null. An empty
+/// field set is never a no-op. A representation mismatch (e.g. NetBox returns a
+/// `{value,label}` object while the request is a scalar) compares as changed, so
+/// this never produces a false "no change".
+pub fn allUnchanged(
+    requested: std.json.Value,
+    current: std.json.Value,
+    fields: []const []const u8,
+) bool {
+    if (fields.len == 0) return false;
+    const req = switch (requested) {
+        .object => |o| o,
+        else => return false,
+    };
+    const cur = switch (current) {
+        .object => |o| o,
+        else => return false,
+    };
+    for (fields) |f| {
+        const rv = req.get(f) orelse std.json.Value{ .null = {} };
+        const cv = cur.get(f) orelse std.json.Value{ .null = {} };
+        if (!valueEqual(rv, cv)) return false;
+    }
+    return true;
+}
+
 /// Deterministic hash over the meaningful, security-relevant parts of a plan.
 /// Approvals bind to this hash so an approved plan cannot be mutated.
 pub fn computeHash(
@@ -131,4 +216,41 @@ test "buildChanges parses types and computeHash is stable" {
     try testing.expect(!std.mem.eql(u8, h1, h3));
     const h4 = try computeHash(a, "device", "2", "update", ch);
     try testing.expect(!std.mem.eql(u8, h1, h4));
+}
+
+test "valueEqual + allUnchanged detect no-op updates" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Requested values, parsed the same way NetBox returns scalar fields.
+    const requested = try buildChanges(a, &.{
+        .{ .key = "description", .value = "edge router" },
+        .{ .key = "vid", .value = "100" },
+    });
+    const fields = try changeFields(a, requested);
+
+    var cur: std.json.ObjectMap = .empty;
+    try cur.put(a, "description", .{ .string = "edge router" });
+    try cur.put(a, "vid", .{ .integer = 100 });
+    try testing.expect(allUnchanged(requested, .{ .object = cur }, fields));
+
+    // A single differing field defeats the no-op.
+    var cur2: std.json.ObjectMap = .empty;
+    try cur2.put(a, "description", .{ .string = "core router" });
+    try cur2.put(a, "vid", .{ .integer = 100 });
+    try testing.expect(!allUnchanged(requested, .{ .object = cur2 }, fields));
+
+    // An empty field set is never a no-op.
+    try testing.expect(!allUnchanged(requested, .{ .object = cur }, &.{}));
+
+    // Representation mismatch (NetBox {value,label} object vs scalar request) is
+    // treated as changed, never a false no-op.
+    var status_obj: std.json.ObjectMap = .empty;
+    try status_obj.put(a, "value", .{ .string = "active" });
+    var cur3: std.json.ObjectMap = .empty;
+    try cur3.put(a, "status", .{ .object = status_obj });
+    const req_status = try buildChanges(a, &.{.{ .key = "status", .value = "active" }});
+    const sf = try changeFields(a, req_status);
+    try testing.expect(!allUnchanged(req_status, .{ .object = cur3 }, sf));
 }

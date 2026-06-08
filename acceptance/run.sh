@@ -233,7 +233,7 @@ echo "================ 验收用例 ================"
 guard version
 check "version: 退出码 0" "$GRC" "0"
 check "version: ok=true" "$(j '.ok')" "true"
-check "version: 版本号" "$(j '.data.version')" "0.6.1"
+check "version: 版本号" "$(j '.data.version')" "0.6.2"
 check "version: token_configured=true" "$(j '.data.token_configured')" "true"
 
 # 2) help
@@ -690,6 +690,78 @@ check "403(坏 token): error.kind=netbox_error" "$(j '.error.kind')" "netbox_err
 check "403(坏 token): message 含 HTTP 403" "$(j '.error.message | contains("403")')" "true"
 check "403(坏 token): message 透传 NetBox detail" "$(j '.error.message | contains("Invalid")')" "true"
 check "403(坏 token): next_action 指向 NETBOX_TOKEN" "$(j '.error.next_action | contains("NETBOX_TOKEN")')" "true"
+
+# 4l) snapshot / export 读敏感策略（#14：所有"完整对象"读面必须与 get --fields all 同等门禁；
+#     snapshot 默认脱敏、--fields all 走读审批；export 批量永不披露原始敏感值，full 档逐条脱敏）
+echo ""
+echo "-- 4l) snapshot/export 读敏感策略（#14）--"
+# snapshot 默认 basic：敏感字段脱敏，无需审批
+guard snapshot contact "$CONTACT_ID"
+check "snapshot(默认): ok=true" "$(j '.ok')" "true"
+check "snapshot(默认): field_profile=basic" "$(j '.data.read_policy.field_profile')" "basic"
+check "snapshot(默认): phone 被脱敏" "$(j '.data.resource.phone')" "[redacted: read approval required]"
+check "snapshot(默认): metadata.redacted_fields 含 phone" \
+  "$(j '.data.metadata.redacted_fields | index("phone") != null')" "true"
+
+# snapshot --fields all 未审批：被读门禁拦截（与 get 同等）
+guard snapshot contact "$CONTACT_ID" --fields all
+check "snapshot(all 未审批): 退出码 2" "$GRC" "2"
+check "snapshot(all 未审批): needs_approval" "$(j '.error.kind')" "needs_approval"
+
+# snapshot --fields all --plan-read：snapshot 自身即可创建读计划
+guard snapshot contact "$CONTACT_ID" --fields all --plan-read
+check "snapshot plan-read: ok=true" "$(j '.ok')" "true"
+check "snapshot plan-read: action=read" "$(j '.data.plan.action')" "read"
+check "snapshot plan-read: status=pending_approval" "$(j '.data.plan.status')" "pending_approval"
+SRPLAN=$(j '.data.plan.plan_id')
+
+# approve-read 后凭计划披露完整对象：phone 还原真实值，并记入审计
+guard approve-read --plan "$SRPLAN" --note "acceptance snapshot read"
+check "snapshot approve-read: 退出码 0" "$GRC" "0"
+guard snapshot contact "$CONTACT_ID" --fields all --plan "$SRPLAN"
+check "snapshot(已审批 all): ok=true" "$(j '.ok')" "true"
+check "snapshot(已审批 all): field_profile=all" "$(j '.data.read_policy.field_profile')" "all"
+check "snapshot(已审批 all): phone 披露真实值" "$(j '.data.resource.phone')" "+1-555-0100"
+check "snapshot(已审批 all): disclosed_fields 含 phone" \
+  "$(j '.data.read_policy.disclosed_fields | index("phone") != null')" "true"
+
+# export --fields full：逐条脱敏敏感字段，metadata.redacted_fields 汇报（批量永不披露原始值）
+guard export contact --filter id="$CONTACT_ID" --fields full
+check "export(full): ok=true" "$(j '.ok')" "true"
+check "export(full): 命中目标 contact" "$(j '.data.records[0].id')" "$CONTACT_ID"
+check "export(full): phone 被脱敏" "$(j '.data.records[0].phone')" "[redacted: read approval required]"
+check "export(full): metadata.redacted_fields 含 phone" \
+  "$(j '.data.metadata.redacted_fields | index("phone") != null')" "true"
+
+# 4m) plan no_change（#13：所有 --set 值与当前状态完全一致 -> 拒绝建计划，不产生可应用计划，
+#     不产生审批/备份/审计；部分变更或真实变更仍正常建计划）
+echo ""
+echo "-- 4m) plan no_change（#13）--"
+# 先把 contact.title 设为已知值（低风险字段，计划->应用，建立确定基线）
+guard plan contact "$CONTACT_ID" --set title="NoOp Title"
+check "no_change 准备: plan ok=true" "$(j '.ok')" "true"
+NOOP_PLAN=$(j '.data.plan.plan_id')
+guard apply --plan "$NOOP_PLAN"
+check "no_change 准备: apply 退出码 0" "$GRC" "0"
+check "no_change 准备: status=applied" "$(j '.data.status')" "applied"
+
+# 用相同值再次 plan：必须 no_change、退出码 2、且不产生 plan
+guard plan contact "$CONTACT_ID" --set title="NoOp Title"
+check "no_change(同值): 退出码 2" "$GRC" "2"
+check "no_change(同值): ok=false" "$(j '.ok')" "false"
+check "no_change(同值): error.kind=no_change" "$(j '.error.kind')" "no_change"
+check "no_change(同值): data.status=no_change" "$(j '.data.status')" "no_change"
+check "no_change(同值): 未创建 plan（无 plan 键）" "$(j '.data | has("plan")')" "false"
+check "no_change(同值): 回传 requested.title" "$(j '.data.requested.title')" "NoOp Title"
+
+# 部分变更（一个字段同值、另一个字段不同）：仍正常建计划
+guard plan contact "$CONTACT_ID" --set title="NoOp Title" --set description="partial change"
+check "no_change(部分变更): ok=true 仍建计划" "$(j '.ok')" "true"
+check "no_change(部分变更): 有 plan_id" "$(j '.data.plan.plan_id | length > 0')" "true"
+
+# 真实变更（值不同）：仍正常建计划
+guard plan contact "$CONTACT_ID" --set title="Changed Title"
+check "no_change(异值): ok=true 仍建计划" "$(j '.ok')" "true"
 
 # --- 汇总 ------------------------------------------------------------------
 echo ""

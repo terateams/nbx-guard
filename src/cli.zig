@@ -16,7 +16,7 @@ const netbox = @import("netbox.zig");
 const doctor = @import("doctor.zig");
 const config = @import("config.zig");
 
-pub const version = "0.6.1";
+pub const version = "0.6.2";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
@@ -184,9 +184,9 @@ fn printHelp(ctx: *Context) !void {
             "resolve <type> [--name v] [--slug v] [--address v] [--display v] [k=v ...]",
             "                                 Resolve human-readable identifiers to an object id (ambiguous => candidate list, never a silent pick)",
             "export <type> [--filter k=v] [-q text] [--fields basic|full] [--format json|jsonl] [--out path] [--limit N]",
-            "                                 Read-only export/snapshot of matching resources with provenance metadata",
-            "snapshot <type> <id> [--out path]",
-            "                                 Read-only point-in-time snapshot of one resource with provenance metadata",
+            "                                 Read-only export of matching resources (full tier redacts read-sensitive values)",
+            "snapshot <type> <id> [--fields basic|all] [--plan-read] [--plan <id>] [--out path]",
+            "                                 Read-only snapshot of one resource; sensitive fields redacted unless disclosed via a read approval",
             "describe [<type>] [--source options|openapi] [--refresh] [--offline]",
             "                                 Self-describe a type: action, fields, I/O schema (live-synced to NetBox)",
             "plan <type> <id> --set k=v ...   Create a change plan (policy + risk checked)",
@@ -697,24 +697,33 @@ fn createReadPlan(
     return exit_ok;
 }
 
-/// Serve a full-object read under a previously approved read plan, verifying the
-/// plan is an approved read for this exact resource and that its approval binds
-/// the plan_hash (tamper-evident, mirroring `apply`).
-fn serveApprovedRead(
+/// Result of verifying a read plan authorizes disclosing a specific resource.
+const ReadAuth = union(enum) {
+    /// Verified and audited. Carries arena-owned ids for response annotation.
+    ok: struct { plan_id: []const u8, approval_id: ?[]const u8 },
+    /// A failure envelope was already emitted; carries its exit code.
+    handled: u8,
+};
+
+/// Verify a read plan is an approved read for this exact resource, that its
+/// stored form still hashes to its plan_hash, and that the bound approval covers
+/// that hash (tamper-evident, mirroring `apply`). On success writes the
+/// `read_served` audit record and returns `.ok`; on any failure emits the
+/// envelope and returns `.handled`. Shared by `get`/`inspect` and `snapshot`.
+fn authorizeApprovedRead(
     ctx: *Context,
     comptime command: []const u8,
     rtype: []const u8,
     rid: []const u8,
-    resource: std.json.Value,
-    sensitive: []const []const u8,
     plan_id: []const u8,
-) !u8 {
+) !ReadAuth {
     const store = Store.init(ctx);
     try store.ensureDirs();
     const lock = try store.acquireLock();
     defer lock.release();
 
-    const loaded = (try plan.load(store, plan_id)) orelse return failPlanNotFound(ctx, command, plan_id);
+    const loaded = (try plan.load(store, plan_id)) orelse
+        return .{ .handled = try failPlanNotFound(ctx, command, plan_id) };
     defer loaded.deinit();
     const p = loaded.value;
 
@@ -724,7 +733,7 @@ fn serveApprovedRead(
             .message = "--plan does not reference a read plan",
             .next_action = "create one with `nbxg " ++ command ++ " <type> <id> --fields all --plan-read`",
         });
-        return exit_client;
+        return .{ .handled = exit_client };
     }
     if (!eq(p.resource_type, rtype) or !eq(p.resource_id, rid)) {
         try ctx.fail(command, .{
@@ -732,7 +741,7 @@ fn serveApprovedRead(
             .message = "read plan was approved for a different resource",
             .next_action = "create a read plan for this exact <type> <id>",
         });
-        return exit_client;
+        return .{ .handled = exit_client };
     }
     if (eq(p.status, plan.status_rejected)) {
         try ctx.fail(command, .{
@@ -740,7 +749,7 @@ fn serveApprovedRead(
             .message = "read plan was rejected and cannot disclose data",
             .next_action = "create a new read plan",
         });
-        return exit_client;
+        return .{ .handled = exit_client };
     }
     if (!eq(p.status, plan.status_approved)) {
         try ctx.fail(command, .{
@@ -749,7 +758,7 @@ fn serveApprovedRead(
             .risk_level = "high",
             .next_action = "run `nbxg approve-read --plan <plan_id>` first",
         });
-        return exit_client;
+        return .{ .handled = exit_client };
     }
 
     // Integrity: the stored read plan must still hash to its plan_hash, and the
@@ -761,7 +770,7 @@ fn serveApprovedRead(
             .message = "read plan integrity check failed: stored plan does not match its plan_hash",
             .next_action = "discard this tampered read plan and create a new one",
         });
-        return exit_client;
+        return .{ .handled = exit_client };
     }
     const bound = if (p.approval_id) |aid| (try approval.load(store, aid)) else null;
     defer {
@@ -774,7 +783,7 @@ fn serveApprovedRead(
             .message = "approval does not match this read plan (missing approval or plan_hash mismatch)",
             .next_action = "re-approve the read plan before disclosing data",
         });
-        return exit_client;
+        return .{ .handled = exit_client };
     }
 
     try audit.append(store, .{
@@ -788,14 +797,33 @@ fn serveApprovedRead(
         .risk_level = "high",
     });
 
-    return emitRead(ctx, command, rtype, rid, resource, .{
-        .field_profile = "all",
-        .risk_level = "high",
-        .disclosed_fields = sensitive,
-        .read_plan = p.plan_id,
-        .approval_id = p.approval_id,
-        .note = "full object disclosed under an approved read plan; this disclosure is recorded in the audit log.",
-    }, "sensitive fields disclosed under approved read plan");
+    return .{ .ok = .{
+        .plan_id = try ctx.arena.dupe(u8, p.plan_id),
+        .approval_id = if (p.approval_id) |aid| try ctx.arena.dupe(u8, aid) else null,
+    } };
+}
+
+/// Serve a full-object read under a previously approved read plan.
+fn serveApprovedRead(
+    ctx: *Context,
+    comptime command: []const u8,
+    rtype: []const u8,
+    rid: []const u8,
+    resource: std.json.Value,
+    sensitive: []const []const u8,
+    plan_id: []const u8,
+) !u8 {
+    switch (try authorizeApprovedRead(ctx, command, rtype, rid, plan_id)) {
+        .handled => |code| return code,
+        .ok => |info| return emitRead(ctx, command, rtype, rid, resource, .{
+            .field_profile = "all",
+            .risk_level = "high",
+            .disclosed_fields = sensitive,
+            .read_plan = info.plan_id,
+            .approval_id = info.approval_id,
+            .note = "full object disclosed under an approved read plan; this disclosure is recorded in the audit log.",
+        }, "sensitive fields disclosed under approved read plan"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1270,6 +1298,26 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
     const base_snapshot = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, base_res.body, .{}) catch
         std.json.Value{ .null = {} };
     const base_values = try backup.priorValues(ctx.arena, base_snapshot, fields);
+
+    // No-op guard: when every requested value already equals the current NetBox
+    // value, a plan would encode an empty change. Refuse with `no_change` and
+    // create nothing (no plan, approval, backup, or audit record) so agents don't
+    // apply nothing. Partial changes (any field differs) proceed normally.
+    if (plan.allUnchanged(changes_value, base_values, fields)) {
+        try ctx.failData("plan", .{
+            .kind = .no_change,
+            .message = "requested values already match the current resource state; no change plan was created",
+            .risk_level = "low",
+            .next_action = "nothing to change — the resource already has these values; inspect with `nbxg get <type> <id>` or set different values",
+        }, .{
+            .status = "no_change",
+            .resource_type = rtype,
+            .resource_id = rid,
+            .requested = changes_value,
+            .current = base_values,
+        });
+        return exit_client;
+    }
 
     const store = Store.init(ctx);
     try store.ensureDirs();
@@ -2241,6 +2289,9 @@ const ExportMeta = struct {
     resource_id: ?[]const u8 = null,
     /// Read-surface tier: "basic" (minimal/brief) or "full".
     field_profile: []const u8,
+    /// Read-sensitive fields whose values were redacted in this artifact (empty
+    /// when nothing was redacted, e.g. a snapshot disclosed under a read plan).
+    redacted_fields: []const []const u8 = &.{},
     /// Output encoding for the `--out` file (export only).
     format: ?[]const u8 = null,
     /// NetBox fuzzy `q` text, when given (export only).
@@ -2478,11 +2529,39 @@ fn cmdExport(ctx: *Context, rest: []const [:0]const u8) !u8 {
         if (@as(i64, @intCast(cur_offset)) >= total) break;
     }
 
+    // Bulk export never discloses raw read-sensitive values: a collection has no
+    // per-object read-approval binding. In the `full` tier we redact every
+    // record's sensitive fields (the `basic` tier uses NetBox `brief`, which
+    // already omits them). To read raw sensitive values, use single-object
+    // `get`/`snapshot` with an approved read plan.
+    var out_records: []const std.json.Value = records.items;
+    var redacted_fields: []const []const u8 = &.{};
+    if (full) {
+        var redacted: std.ArrayList(std.json.Value) = .empty;
+        var seen: std.ArrayList([]const u8) = .empty;
+        for (records.items) |rec| {
+            for (try policy.sensitiveFieldsPresent(ctx.arena, ctx.env, rec)) |name| {
+                var found = false;
+                for (seen.items) |x| {
+                    if (eq(x, name)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) try seen.append(ctx.arena, name);
+            }
+            try redacted.append(ctx.arena, try policy.redactSensitive(ctx.arena, ctx.env, rec));
+        }
+        out_records = redacted.items;
+        redacted_fields = seen.items;
+    }
+
     const meta = ExportMeta{
         .kind = "export",
         .resource_type = rt,
         .netbox_endpoint = ep,
         .field_profile = field_profile,
+        .redacted_fields = redacted_fields,
         .format = format,
         .query = query_text,
         .filters = filters.items,
@@ -2497,9 +2576,9 @@ fn cmdExport(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     if (out_path) |op| {
         const bytes = if (fmt_jsonl)
-            try renderJsonl(ctx, meta, records.items)
+            try renderJsonl(ctx, meta, out_records)
         else
-            try std.json.Stringify.valueAlloc(ctx.gpa, .{ .metadata = meta, .records = records.items }, .{ .whitespace = .indent_2 });
+            try std.json.Stringify.valueAlloc(ctx.gpa, .{ .metadata = meta, .records = out_records }, .{ .whitespace = .indent_2 });
         defer ctx.gpa.free(bytes);
         writeOutFile(ctx, op, bytes) catch |err| return failOutWrite(ctx, command, op, err);
         try ctx.ok(command, .{
@@ -2509,14 +2588,17 @@ fn cmdExport(ctx: *Context, rest: []const [:0]const u8) !u8 {
             .note = if (basic)
                 "basic field profile: minimal, low-risk read surface. Use --fields full for complete attributes."
             else
-                "full field profile: complete attributes (wider read surface).",
+                "full field profile: complete attributes; read-sensitive field values are redacted (bulk export never discloses raw sensitive values — use `nbxg get`/`snapshot` with a read approval).",
             .next_action = "review or archive the export; re-run later and diff to detect drift",
         });
     } else {
         try ctx.ok(command, .{
             .metadata = meta,
-            .records = records.items,
-            .note = "no --out given: records embedded in this response. Pass --out <path> with --format json|jsonl to persist.",
+            .records = out_records,
+            .note = if (basic)
+                "no --out given: records embedded in this response. Pass --out <path> with --format json|jsonl to persist."
+            else
+                "no --out given: records embedded (read-sensitive values redacted in the full tier). Pass --out <path> with --format json|jsonl to persist.",
             .next_action = "pass --out <path> to persist this export for offline review",
         });
     }
@@ -2524,13 +2606,19 @@ fn cmdExport(ctx: *Context, rest: []const [:0]const u8) !u8 {
 }
 
 /// `snapshot <type> <id>`: read-only point-in-time capture of one object with
-/// provenance metadata, for pre-change review and post-change comparison.
+/// provenance metadata, for pre-change review and post-change comparison. The
+/// read surface is gated exactly like `get`: `--fields basic` (default) redacts
+/// read-sensitive fields; `--fields all` requires an approved read plan
+/// (`--plan-read` then `approve-read` then `--plan <id>`) to disclose them.
 fn cmdSnapshot(ctx: *Context, rest: []const [:0]const u8) !u8 {
     const command = "snapshot";
 
     var rtype: ?[]const u8 = null;
     var rid: ?[]const u8 = null;
     var out_path: ?[]const u8 = null;
+    var profile: []const u8 = "basic";
+    var plan_read = false;
+    var read_plan_id: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
@@ -2542,6 +2630,26 @@ fn cmdSnapshot(ctx: *Context, rest: []const [:0]const u8) !u8 {
             }
         } else if (std.mem.startsWith(u8, a, "--out=")) {
             out_path = a["--out=".len..];
+        } else if (eq(a, "--fields")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                profile = rest[i];
+            }
+        } else if (std.mem.startsWith(u8, a, "--fields=")) {
+            profile = a["--fields=".len..];
+        } else if (eq(a, "--all-fields")) {
+            profile = "all";
+        } else if (eq(a, "--redact")) {
+            profile = "basic";
+        } else if (eq(a, "--plan-read")) {
+            plan_read = true;
+        } else if (eq(a, "--plan")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                read_plan_id = rest[i];
+            }
+        } else if (std.mem.startsWith(u8, a, "--plan=")) {
+            read_plan_id = a["--plan=".len..];
         } else if (!std.mem.startsWith(u8, a, "-")) {
             if (rtype == null) {
                 rtype = a;
@@ -2553,6 +2661,20 @@ fn cmdSnapshot(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     const rt = rtype orelse return failSnapshotUsage(ctx);
     const id = rid orelse return failSnapshotUsage(ctx);
+
+    // Read field-scope tier (default-deny on a typo so it can never widen the
+    // read): "basic" redacts read-sensitive fields; "all" requests the full
+    // object and is gated behind a read approval when sensitive fields are present.
+    const basic = eq(profile, "basic") or eq(profile, "brief");
+    const all = eq(profile, "all") or eq(profile, "full");
+    if (!basic and !all) {
+        try ctx.fail(command, .{
+            .kind = .invalid_args,
+            .message = "fields tier must be 'basic' or 'all'",
+            .next_action = "use --fields basic (minimal, redacted read) or --fields all (requires read approval for sensitive fields)",
+        });
+        return exit_client;
+    }
 
     const ep = netbox.endpointFor(ctx.env, rt) orelse return failUnknownType(ctx, command, rt);
     if (ctx.config.netbox_token == null) return failNoToken(ctx, command);
@@ -2566,12 +2688,61 @@ fn cmdSnapshot(ctx: *Context, rest: []const [:0]const u8) !u8 {
     const resource = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, res.body, .{}) catch
         std.json.Value{ .null = {} };
 
+    const sensitive = try policy.sensitiveFieldsPresent(ctx.arena, ctx.env, resource);
+
+    // Same read-sensitive gate as `get --fields all`: basic redacts; full
+    // requires an approved read plan when sensitive fields are present. The read
+    // tier uses get's vocabulary ("basic"/"all") for cross-command consistency.
+    var emit_resource = resource;
+    var emit_profile: []const u8 = "all";
+    var redacted_fields: []const []const u8 = &.{};
+    var disclosed_fields: []const []const u8 = &.{};
+    var used_plan: ?[]const u8 = null;
+    var used_approval: ?[]const u8 = null;
+
+    if (basic) {
+        emit_resource = try policy.redactSensitive(ctx.arena, ctx.env, resource);
+        emit_profile = "basic";
+        redacted_fields = sensitive;
+    } else if (sensitive.len == 0) {
+        emit_profile = "all";
+    } else if (read_plan_id) |pid| {
+        switch (try authorizeApprovedRead(ctx, command, rt, id, pid)) {
+            .handled => |code| return code,
+            .ok => |info| {
+                emit_profile = "all";
+                disclosed_fields = sensitive;
+                used_plan = info.plan_id;
+                used_approval = info.approval_id;
+            },
+        }
+    } else if (plan_read) {
+        return createReadPlan(ctx, command, rt, id, resource, sensitive);
+    } else {
+        try ctx.fail(command, .{
+            .kind = .needs_approval,
+            .message = "full snapshot of read-sensitive fields requires an approved read plan",
+            .risk_level = "high",
+            .next_action = "run `nbxg snapshot <type> <id> --fields all --plan-read`, approve with `nbxg approve-read --plan <plan_id>`, then re-run with `--plan <plan_id>`",
+        });
+        return exit_client;
+    }
+
+    const read_policy = .{
+        .field_profile = emit_profile,
+        .redacted_fields = redacted_fields,
+        .disclosed_fields = disclosed_fields,
+        .read_plan = used_plan,
+        .approval_id = used_approval,
+    };
+
     const meta = ExportMeta{
         .kind = "snapshot",
         .resource_type = rt,
         .netbox_endpoint = ep,
         .resource_id = id,
-        .field_profile = "full",
+        .field_profile = emit_profile,
+        .redacted_fields = redacted_fields,
         .count = 1,
         .generated_at = nsToSecs(ctx.nowNanos()),
         .netbox_url_hash = try urlHash16(ctx.arena, ctx.config.netbox_url),
@@ -2579,22 +2750,31 @@ fn cmdSnapshot(ctx: *Context, rest: []const [:0]const u8) !u8 {
         .branch = netbox.activeBranch(ctx.config),
     };
 
+    const note: []const u8 = if (basic)
+        "basic snapshot: read-sensitive fields redacted. Use --fields all with a read approval to disclose them."
+    else if (disclosed_fields.len > 0)
+        "full snapshot disclosed under an approved read plan; this disclosure is recorded in the audit log."
+    else
+        "full snapshot: no read-sensitive fields present on this object.";
+
     if (out_path) |op| {
-        const bytes = try std.json.Stringify.valueAlloc(ctx.gpa, .{ .metadata = meta, .resource = resource }, .{ .whitespace = .indent_2 });
+        const bytes = try std.json.Stringify.valueAlloc(ctx.gpa, .{ .metadata = meta, .resource = emit_resource }, .{ .whitespace = .indent_2 });
         defer ctx.gpa.free(bytes);
         writeOutFile(ctx, op, bytes) catch |err| return failOutWrite(ctx, command, op, err);
         try ctx.ok(command, .{
             .metadata = meta,
+            .read_policy = read_policy,
             .out = op,
             .bytes = bytes.len,
-            .note = "read-only snapshot written; the file embeds provenance metadata for later review/comparison",
+            .note = note,
             .next_action = "review or archive the snapshot; re-run later and diff to detect change",
         });
     } else {
         try ctx.ok(command, .{
             .metadata = meta,
-            .resource = resource,
-            .note = "read-only snapshot (no --out given, embedded in this response)",
+            .read_policy = read_policy,
+            .resource = emit_resource,
+            .note = note,
             .next_action = "pass --out <path> to persist this snapshot for offline review",
         });
     }

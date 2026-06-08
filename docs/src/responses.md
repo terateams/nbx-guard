@@ -56,6 +56,9 @@
 | `invalid_field` | 字段取值不可接受。 |
 | `needs_approval` | plan 是高风险且尚未审批。 |
 | `not_approved` | 对未审批的高风险 plan 执行了 `apply`。 |
+| `not_found` | `resolve` 未匹配到任何对象。 |
+| `ambiguous` | `resolve` 匹配到多个对象，只返回候选列表，绝不静默挑选。 |
+| `no_change` | `plan` 的全部 `--set` 值已与当前状态一致，未创建任何计划（无审批/备份/审计）。 |
 | `plan_not_found` | 没有对应 id 的 plan。 |
 | `approval_not_found` | 没有对应 id 的 approval。 |
 | `backup_not_found` | 没有对应 id 的 backup。 |

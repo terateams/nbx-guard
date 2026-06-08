@@ -13,6 +13,7 @@ pub const ErrKind = enum {
     not_approved,
     not_found,
     ambiguous,
+    no_change,
     plan_not_found,
     approval_not_found,
     backup_not_found,

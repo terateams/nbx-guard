@@ -147,8 +147,9 @@ nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（b
 nbxg search <type> -q <text> [选项]   按 NetBox q 模糊搜索某类型的对象
 nbxg resolve <type> [--name|--slug|--address v | k=v]
                                       人类可读标识 -> 对象 id（歧义返回候选列表，绝不静默挑选）
-nbxg export <type> [选项]             只读导出/快照匹配资源（含来源元数据）
-nbxg snapshot <type> <id> [--out p]   只读快照单个资源（含来源元数据）
+nbxg export <type> [选项]             只读批量导出匹配资源（full 档脱敏读敏感字段）
+nbxg snapshot <type> <id> [--fields basic|all] [--plan-read] [--plan <id>] [--out p]
+                                      只读快照单个资源（basic 默认脱敏，all 需读审批）
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：可写字段 / 输入输出 schema，实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
