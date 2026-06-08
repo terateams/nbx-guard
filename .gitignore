@@ -8,5 +8,8 @@ zig-out/
 # mdBook output
 docs/book/
 
+# Acceptance harness local state
+acceptance/.state/
+
 # OS noise
 .DS_Store
