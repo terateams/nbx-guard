@@ -33,6 +33,9 @@ flowchart LR
 - **应用前备份**——每次 apply 都会对资源及其原字段值做快照。
 - **全程审计**——只追加（append-only）的 JSONL 轨迹，每条事件都关联 `plan_id` / `approval_id` / `backup_id` / `request_id`。
 - **可回滚**——任何已应用的变更都能从其备份恢复。
+- **读取最小化（read minimization）**——读取也分级：`get`/`inspect` 默认 `--fields basic`，
+  把读敏感字段（如 `phone`/`email`/`comments`/`custom_fields`/`tenant`）**脱敏**；要整对象读取
+  （`--fields all`）须走 `--plan-read → approve-read` 审批路径，整个披露过程进审计。
 - **无原始访问 / 无删除**——只允许 `update`；`delete` / `bulk_delete` / 原始 API 访问都不暴露。
 - **对 agent 友好的 JSON**——每条命令都打印一个信封，含 `ok`、`data`，以及携带 `kind`、`risk_level`、`next_action` 的 `error`。
 - **自描述（self-describe）**——`describe` 让 agent 在动手前了解每个类型能改什么、输入输出 schema，并把字段元数据实时对齐真实 NetBox（`OPTIONS` 或官方 `OpenAPI` 描述文件）。
@@ -85,6 +88,7 @@ bash scripts/installer.sh
 | `NBX_GUARD_EXTRA_RESOURCES` | _（未设置）_ | **算子**扩展受治理类型（`类型=端点` 列表，如 `site=dcim/sites`） |
 | `NBX_GUARD_ALLOWED_FIELDS` | _（未设置）_ | **算子**追加的低风险字段（逗号/空格分隔） |
 | `NBX_GUARD_HIGH_RISK_FIELDS` | _（未设置）_ | **算子**追加的高风险字段（需审批） |
+| `NBX_GUARD_READ_SENSITIVE_FIELDS` | _（未设置）_ | **算子**追加的读敏感字段（整对象读取需 `approve-read`） |
 
 `NETBOX_TOKEN` 同时支持 NetBox v1 与 v2 token：以 `nbt_` 开头的 v2 token（NetBox 4.5+
 默认）自动以 `Bearer` 方案鉴权，其余按 v1 `Token` 方案发送——把 NetBox 给你的 token
@@ -105,6 +109,17 @@ API 完成——这些审批者级别的生命周期操作刻意不由 agent 网
 
 支持的资源类型：`device`、`interface`、`ip-address`、`prefix`、`vlan`、`contact`。
 
+### 读取策略（read-policy）
+
+读取与写入分开分级。读取面默认最小化，整对象读取需审批：
+
+| 分类 | 字段 | 行为 |
+| --- | --- | --- |
+| 基本（低风险读） | `id`、`name`、`display`、`status`、`serial` 等标识/非敏感字段 | `--fields basic`（默认）直接返回 |
+| 读敏感 | `phone`、`email`、`comments`、`custom_fields`、`tenant` | `basic` 下脱敏；`--fields all` 整对象读取需 `approve-read` |
+
+> 人工算子可用 `NBX_GUARD_READ_SENSITIVE_FIELDS` 追加读敏感字段（读侧对应写侧的 `*_FIELDS`）。
+
 > **算子可扩展**：以上是内置的安全下限。人工运维方（非 agent）可用 `NBX_GUARD_EXTRA_RESOURCES`
 > 增加受治理类型、用 `NBX_GUARD_ALLOWED_FIELDS` / `NBX_GUARD_HIGH_RISK_FIELDS` 增加字段，
 > 而默认拒绝与全部工作流控制（plan/审批/备份/漂移/审计/还原）保持不变，agent 自身无法扩展。
@@ -116,8 +131,9 @@ API 完成——这些审批者级别的生命周期操作刻意不由 agent 网
 nbxg version                          打印版本与当前生效配置
 nbxg help                             显示帮助
 nbxg doctor [--skill <dir>]           自检：安装的二进制与 SKILL.md/源码是否一致（离线）
-nbxg get <type> <id>                  读取资源（只读）
-nbxg inspect <type> <id>              读取资源并标注字段策略
+nbxg get <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]
+                                      读取资源；basic（默认）脱敏读敏感字段，all 需读审批
+nbxg inspect <type> <id> [--fields basic|all]  读取资源并标注读/写字段策略
 nbxg list-resources <type> [选项]     列出某类型的对象以发现 id（brief 只读）
 nbxg search <type> -q <text> [选项]   按 NetBox q 模糊搜索某类型的对象
 nbxg export <type> [选项]             只读导出/快照匹配资源（含来源元数据）
@@ -126,6 +142,7 @@ nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：可写字段 / 输入输出 schema，实时对齐 NetBox
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
 nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
+nbxg approve-read --plan <id> [--note x]  审批一次敏感对象的整体读取（绑定 plan_hash）
 nbxg reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）
 nbxg apply --plan <id>                先备份，再应用一个已审批/低风险的 plan
 nbxg restore --backup <id>            从备份快照回滚资源
@@ -160,6 +177,19 @@ nbxg apply --plan plan_...      # 被拒：error.kind = "not_approved"
 
 nbxg approve --plan plan_... --note "approved by netops"
 nbxg apply --plan plan_...      # 现在被允许
+```
+
+### 敏感字段的整体读取（需要读审批）
+
+```sh
+nbxg get device 123                         # 默认 basic：读敏感字段被脱敏
+nbxg get device 123 --fields all            # 含敏感字段 -> error.kind = "needs_approval"
+
+nbxg get device 123 --fields all --plan-read
+# -> 创建读 plan（rplan_...），status: "pending_approval"，并返回脱敏预览
+
+nbxg approve-read --plan rplan_... --note "approved by netops"
+nbxg get device 123 --fields all --plan rplan_...   # 现在披露整对象（进审计）
 ```
 
 ## 响应信封

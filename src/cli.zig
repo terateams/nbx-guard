@@ -48,6 +48,8 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
         return cmdPlan(ctx, rest);
     } else if (eq(cmd, "approve")) {
         return cmdApprove(ctx, rest);
+    } else if (eq(cmd, "approve-read")) {
+        return cmdApproveRead(ctx, rest);
     } else if (eq(cmd, "reject")) {
         return cmdReject(ctx, rest);
     } else if (eq(cmd, "apply")) {
@@ -115,8 +117,10 @@ fn printHelp(ctx: *Context) !void {
             "version                          Print version and active configuration",
             "help                             Show this help",
             "doctor [--skill <dir>]           Check installed binary vs SKILL.md/source for drift (offline)",
-            "get <type> <id>                  Read a NetBox resource (read-only)",
-            "inspect <type> <id>              Read a resource annotated with field policy",
+            "get <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]",
+            "                                 Read a NetBox resource (basic redacts sensitive fields; all needs read approval)",
+            "inspect <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]",
+            "                                 Read a resource annotated with read + write field policy",
             "list-resources <type> [--limit N] [--offset N] [--all-fields]",
             "                                 Discover NetBox resources (brief identifying fields; low-risk read)",
             "search <type> [-q text] [--filter k=v] [--limit N] [--all-fields]",
@@ -129,6 +133,7 @@ fn printHelp(ctx: *Context) !void {
             "                                 Self-describe a type: action, fields, I/O schema (live-synced to NetBox)",
             "plan <type> <id> --set k=v ...   Create a change plan (policy + risk checked)",
             "approve --plan <id> [--note x]   Approve a high-risk plan (binds plan_hash)",
+            "approve-read --plan <id> [--note x]  Approve a full read of a sensitive object (binds plan_hash)",
             "reject --plan <id> [--note x]    Reject a plan so it can never be applied",
             "apply --plan <id>                Backup then apply an approved/low-risk plan",
             "restore --backup <id>            Revert a resource from a backup snapshot",
@@ -138,6 +143,7 @@ fn printHelp(ctx: *Context) !void {
         resource_types: []const []const u8,
         allowed_fields: []const []const u8,
         high_risk_fields: []const []const u8,
+        read_sensitive_fields: []const []const u8,
         env: []const []const u8 = &.{
             "NETBOX_URL            NetBox base URL (default http://localhost:8000)",
             "NETBOX_TOKEN          NetBox API token (required for plan/get/inspect/apply/restore)",
@@ -148,6 +154,7 @@ fn printHelp(ctx: *Context) !void {
             "NBX_GUARD_EXTRA_RESOURCES  Operator-added types, e.g. site=dcim/sites,tenant=tenancy/tenants",
             "NBX_GUARD_ALLOWED_FIELDS   Extra low-risk writable fields (comma/space separated)",
             "NBX_GUARD_HIGH_RISK_FIELDS Extra approval-gated writable fields (comma/space separated)",
+            "NBX_GUARD_READ_SENSITIVE_FIELDS  Extra read-sensitive fields gated behind approve-read (comma/space separated)",
         },
         principle: []const u8 = "Agent proposes intent; the CLI decides what is allowed.",
     };
@@ -155,6 +162,7 @@ fn printHelp(ctx: *Context) !void {
         .resource_types = try types.toOwnedSlice(ctx.arena),
         .allowed_fields = ef.allowed,
         .high_risk_fields = ef.high_risk,
+        .read_sensitive_fields = try policy.effectiveReadSensitiveFields(ctx.arena, ctx.env),
     });
 }
 
@@ -404,24 +412,82 @@ fn joinList(arena: std.mem.Allocator, items: []const []const u8) ![]const u8 {
 // ---------------------------------------------------------------------------
 
 fn cmdGet(ctx: *Context, rest: []const [:0]const u8, comptime command: []const u8) !u8 {
-    if (rest.len < 2) {
+    var rtype: ?[]const u8 = null;
+    var rid: ?[]const u8 = null;
+    var profile: []const u8 = "basic";
+    var plan_read = false;
+    var read_plan_id: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (eq(a, "--fields")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                profile = rest[i];
+            }
+        } else if (std.mem.startsWith(u8, a, "--fields=")) {
+            profile = a["--fields=".len..];
+        } else if (eq(a, "--all-fields")) {
+            profile = "all";
+        } else if (eq(a, "--redact")) {
+            profile = "basic";
+        } else if (eq(a, "--plan-read")) {
+            plan_read = true;
+        } else if (eq(a, "--plan")) {
+            if (i + 1 < rest.len) {
+                i += 1;
+                read_plan_id = rest[i];
+            }
+        } else if (std.mem.startsWith(u8, a, "--plan=")) {
+            read_plan_id = a["--plan=".len..];
+        } else if (!std.mem.startsWith(u8, a, "-")) {
+            if (rtype == null) {
+                rtype = a;
+            } else if (rid == null) {
+                rid = a;
+            }
+        }
+    }
+
+    const rt = rtype orelse {
         try ctx.fail(command, .{
             .kind = .invalid_args,
             .message = "expected <type> <id>",
-            .next_action = "example: nbxg " ++ command ++ " device 1",
+            .next_action = "example: nbxg " ++ command ++ " device 1 --fields basic",
+        });
+        return exit_client;
+    };
+    const id = rid orelse {
+        try ctx.fail(command, .{
+            .kind = .invalid_args,
+            .message = "expected <type> <id>",
+            .next_action = "example: nbxg " ++ command ++ " device 1 --fields basic",
+        });
+        return exit_client;
+    };
+
+    // Read field-scope tier (default-deny on a typo so it can never widen the
+    // read): "basic" redacts read-sensitive fields; "all" requests the full
+    // object and is gated behind a read approval when sensitive fields are present.
+    const basic = eq(profile, "basic") or eq(profile, "brief");
+    const all = eq(profile, "all") or eq(profile, "full");
+    if (!basic and !all) {
+        try ctx.fail(command, .{
+            .kind = .invalid_args,
+            .message = "fields tier must be 'basic' or 'all'",
+            .next_action = "use --fields basic (minimal, redacted read) or --fields all (requires read approval)",
         });
         return exit_client;
     }
-    const rtype = rest[0];
-    const rid = rest[1];
 
-    if (netbox.endpointFor(ctx.env, rtype) == null) return failUnknownType(ctx, command, rtype);
+    if (netbox.endpointFor(ctx.env, rt) == null) return failUnknownType(ctx, command, rt);
     if (ctx.config.netbox_token == null) return failNoToken(ctx, command);
 
     var client = netbox.Client.init(ctx);
     defer client.deinit();
 
-    const res = client.get(rtype, rid) catch |err| return failNetboxConn(ctx, command, err);
+    const res = client.get(rt, id) catch |err| return failNetboxConn(ctx, command, err);
     defer ctx.gpa.free(res.body);
 
     if (!res.ok) return failNetboxStatus(ctx, command, res);
@@ -429,22 +495,249 @@ fn cmdGet(ctx: *Context, rest: []const [:0]const u8, comptime command: []const u
     const resource = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, res.body, .{}) catch
         std.json.Value{ .null = {} };
 
+    const sensitive = try policy.sensitiveFieldsPresent(ctx.arena, ctx.env, resource);
+
+    // basic tier: redact sensitive fields, no approval needed.
+    if (basic) {
+        const redacted = try policy.redactSensitive(ctx.arena, ctx.env, resource);
+        return emitRead(ctx, command, rt, id, redacted, .{
+            .field_profile = "basic",
+            .risk_level = "low",
+            .redacted_fields = sensitive,
+            .note = "basic read: sensitive fields redacted. To reveal them, request `--fields all` (requires a read approval).",
+        }, if (sensitive.len > 0)
+            "sensitive fields were redacted; run with `--fields all --plan-read` then `approve-read` to disclose them"
+        else
+            "no read-sensitive fields on this object");
+    }
+
+    // all tier with no sensitive fields present: full object is low-risk.
+    if (sensitive.len == 0) {
+        return emitRead(ctx, command, rt, id, resource, .{
+            .field_profile = "all",
+            .risk_level = "low",
+            .redacted_fields = &[_][]const u8{},
+            .note = "full read: no read-sensitive fields present on this object.",
+        }, "full object returned");
+    }
+
+    // all tier with sensitive fields present: gated behind a read approval.
+    if (read_plan_id) |pid| return serveApprovedRead(ctx, command, rt, id, resource, sensitive, pid);
+    if (plan_read) return createReadPlan(ctx, command, rt, id, resource, sensitive);
+
+    try ctx.fail(command, .{
+        .kind = .needs_approval,
+        .message = "full read of read-sensitive fields requires an approved read plan",
+        .risk_level = "high",
+        .next_action = "run `nbxg " ++ command ++ " <type> <id> --fields all --plan-read`, get it approved with `nbxg approve-read --plan <plan_id>`, then re-run with `--plan <plan_id>`",
+    });
+    return exit_client;
+}
+
+/// Emit a successful read envelope. `inspect` additionally annotates the write
+/// policy so the agent can see what it may later propose to change.
+fn emitRead(
+    ctx: *Context,
+    comptime command: []const u8,
+    rtype: []const u8,
+    rid: []const u8,
+    resource: std.json.Value,
+    read_policy: anytype,
+    next_action: []const u8,
+) !u8 {
     if (eq(command, "inspect")) {
         const ef = try policy.effectiveFields(ctx.arena, ctx.env);
         try ctx.ok(command, .{
             .resource_type = rtype,
             .resource_id = rid,
             .resource = resource,
+            .read_policy = read_policy,
             .policy = .{
                 .allowed_fields = ef.allowed,
                 .high_risk_fields = ef.high_risk,
                 .note = "Other fields are denied by default. High-risk fields require approval.",
             },
+            .next_action = next_action,
         });
     } else {
-        try ctx.ok(command, .{ .resource_type = rtype, .resource_id = rid, .resource = resource });
+        try ctx.ok(command, .{
+            .resource_type = rtype,
+            .resource_id = rid,
+            .resource = resource,
+            .read_policy = read_policy,
+            .next_action = next_action,
+        });
     }
     return exit_ok;
+}
+
+/// Read-plan changes payload: the read tier the plan authorizes. Hashing this
+/// (with the resource type/id and "read" action) binds an approval to a specific
+/// full-object disclosure, exactly like a write plan binds to its changes.
+fn readChanges(ctx: *Context) !std.json.Value {
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(ctx.arena, "field_profile", .{ .string = "all" });
+    return .{ .object = obj };
+}
+
+/// Create a pending-approval read plan for a full-object read whose object
+/// contains read-sensitive fields. Returns a redacted preview so the agent can
+/// see the basic view while approval is sought.
+fn createReadPlan(
+    ctx: *Context,
+    comptime command: []const u8,
+    rtype: []const u8,
+    rid: []const u8,
+    resource: std.json.Value,
+    sensitive: []const []const u8,
+) !u8 {
+    const changes_value = try readChanges(ctx);
+
+    const store = Store.init(ctx);
+    try store.ensureDirs();
+    const lock = try store.acquireLock();
+    defer lock.release();
+
+    const now_ns = ctx.nowNanos();
+    const p: plan.Plan = .{
+        .plan_id = try ids.genId(ctx.arena, "rplan", now_ns),
+        .request_id = try ids.genId(ctx.arena, "req", now_ns),
+        .plan_hash = try plan.computeHash(ctx.arena, rtype, rid, "read", changes_value),
+        .resource_type = rtype,
+        .resource_id = rid,
+        .action = "read",
+        .changes = changes_value,
+        .risk_level = "high",
+        .requires_approval = true,
+        .status = plan.status_pending_approval,
+        .created_at = nsToSecs(now_ns),
+        .netbox_url = ctx.config.netbox_url,
+    };
+    try plan.save(store, p);
+
+    try audit.append(store, .{
+        .ts = p.created_at,
+        .request_id = p.request_id,
+        .event = "read_plan_created",
+        .plan_id = p.plan_id,
+        .resource_type = rtype,
+        .resource_id = rid,
+        .risk_level = p.risk_level,
+    });
+
+    const preview = try policy.redactSensitive(ctx.arena, ctx.env, resource);
+    try ctx.ok(command, .{
+        .plan = p,
+        .read_policy = .{
+            .field_profile = "all",
+            .risk_level = "high",
+            .sensitive_fields = sensitive,
+        },
+        .preview = preview,
+        .next_action = "human approval required: run `nbxg approve-read --plan <plan_id>`, then re-run `nbxg " ++ command ++ " <type> <id> --fields all --plan <plan_id>`",
+    });
+    return exit_ok;
+}
+
+/// Serve a full-object read under a previously approved read plan, verifying the
+/// plan is an approved read for this exact resource and that its approval binds
+/// the plan_hash (tamper-evident, mirroring `apply`).
+fn serveApprovedRead(
+    ctx: *Context,
+    comptime command: []const u8,
+    rtype: []const u8,
+    rid: []const u8,
+    resource: std.json.Value,
+    sensitive: []const []const u8,
+    plan_id: []const u8,
+) !u8 {
+    const store = Store.init(ctx);
+    try store.ensureDirs();
+    const lock = try store.acquireLock();
+    defer lock.release();
+
+    const loaded = (try plan.load(store, plan_id)) orelse return failPlanNotFound(ctx, command, plan_id);
+    defer loaded.deinit();
+    const p = loaded.value;
+
+    if (!eq(p.action, "read")) {
+        try ctx.fail(command, .{
+            .kind = .plan_state_error,
+            .message = "--plan does not reference a read plan",
+            .next_action = "create one with `nbxg " ++ command ++ " <type> <id> --fields all --plan-read`",
+        });
+        return exit_client;
+    }
+    if (!eq(p.resource_type, rtype) or !eq(p.resource_id, rid)) {
+        try ctx.fail(command, .{
+            .kind = .plan_state_error,
+            .message = "read plan was approved for a different resource",
+            .next_action = "create a read plan for this exact <type> <id>",
+        });
+        return exit_client;
+    }
+    if (eq(p.status, plan.status_rejected)) {
+        try ctx.fail(command, .{
+            .kind = .plan_state_error,
+            .message = "read plan was rejected and cannot disclose data",
+            .next_action = "create a new read plan",
+        });
+        return exit_client;
+    }
+    if (!eq(p.status, plan.status_approved)) {
+        try ctx.fail(command, .{
+            .kind = .not_approved,
+            .message = "read plan requires approval before sensitive fields can be disclosed",
+            .risk_level = "high",
+            .next_action = "run `nbxg approve-read --plan <plan_id>` first",
+        });
+        return exit_client;
+    }
+
+    // Integrity: the stored read plan must still hash to its plan_hash, and the
+    // bound approval must cover that exact hash.
+    const recomputed = try plan.computeHash(ctx.arena, p.resource_type, p.resource_id, p.action, p.changes);
+    if (!eq(recomputed, p.plan_hash)) {
+        try ctx.fail(command, .{
+            .kind = .plan_state_error,
+            .message = "read plan integrity check failed: stored plan does not match its plan_hash",
+            .next_action = "discard this tampered read plan and create a new one",
+        });
+        return exit_client;
+    }
+    const bound = if (p.approval_id) |aid| (try approval.load(store, aid)) else null;
+    defer {
+        if (bound) |bp| bp.deinit();
+    }
+    const bound_ok = if (bound) |bp| eq(bp.value.plan_hash, p.plan_hash) else false;
+    if (!bound_ok) {
+        try ctx.fail(command, .{
+            .kind = .plan_state_error,
+            .message = "approval does not match this read plan (missing approval or plan_hash mismatch)",
+            .next_action = "re-approve the read plan before disclosing data",
+        });
+        return exit_client;
+    }
+
+    try audit.append(store, .{
+        .ts = nsToSecs(ctx.nowNanos()),
+        .request_id = try ids.genId(ctx.arena, "req", ctx.nowNanos()),
+        .event = "read_served",
+        .plan_id = p.plan_id,
+        .approval_id = p.approval_id,
+        .resource_type = rtype,
+        .resource_id = rid,
+        .risk_level = "high",
+    });
+
+    return emitRead(ctx, command, rtype, rid, resource, .{
+        .field_profile = "all",
+        .risk_level = "high",
+        .disclosed_fields = sensitive,
+        .read_plan = p.plan_id,
+        .approval_id = p.approval_id,
+        .note = "full object disclosed under an approved read plan; this disclosure is recorded in the audit log.",
+    }, "sensitive fields disclosed under approved read plan");
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +959,12 @@ fn cmdDescribe(ctx: *Context, rest: []const [:0]const u8) !u8 {
             .note = "plan emits data.plan + data.evaluation; apply emits data.backup_id + data.applied",
         },
         .examples = doc.examples,
+        .read_policy = .{
+            .tiers = &[_][]const u8{ "basic", "all" },
+            .default = "basic",
+            .sensitive_fields = try policy.effectiveReadSensitiveFields(ctx.arena, ctx.env),
+            .note = "Reads are scoped: `--fields basic` (default) redacts read-sensitive fields; `--fields all` returns the full object and requires an approved read plan (`--plan-read` then `approve-read`) when sensitive fields are present.",
+        },
         .netbox_sync = .{
             .source_kind = source,
             .status = sync_status,
@@ -719,6 +1018,12 @@ fn describeCatalog(ctx: *Context) !u8 {
         .action = "update",
         .denied_actions = &[_][]const u8{ "create", "delete", "bulk_delete" },
         .default_policy = "deny: only explicitly classified fields are writable",
+        .read_policy = .{
+            .tiers = &[_][]const u8{ "basic", "all" },
+            .default = "basic",
+            .sensitive_fields = try policy.effectiveReadSensitiveFields(ctx.arena, ctx.env),
+            .note = "Read exposure tiers are classified separately from write risk: `--fields basic` (default) redacts read-sensitive fields; `--fields all` requires an approved read plan when sensitive fields are present.",
+        },
         .resource_types = items.items,
         .next_action = "run `nbxg describe <type>` for a type's fields and its live NetBox schema",
     });
@@ -965,6 +1270,16 @@ fn cmdApprove(ctx: *Context, rest: []const [:0]const u8) !u8 {
     defer loaded.deinit();
     var p = loaded.value;
 
+    if (eq(p.action, "read")) {
+        try ctx.fail("approve", .{
+            .kind = .plan_state_error,
+            .message = "this is a read plan; use approve-read to approve a full read",
+            .risk_level = p.risk_level,
+            .next_action = "run `nbxg approve-read --plan <plan_id>`",
+        });
+        return exit_client;
+    }
+
     if (!eq(p.status, plan.status_pending_approval)) {
         try ctx.fail("approve", .{
             .kind = .plan_state_error,
@@ -1009,6 +1324,80 @@ fn cmdApprove(ctx: *Context, rest: []const [:0]const u8) !u8 {
         .approval = a,
         .plan_status = p.status,
         .next_action = "run `nbxg apply --plan <plan_id>`",
+    });
+    return exit_ok;
+}
+
+// ---------------------------------------------------------------------------
+// approve-read (human-in-the-loop gate for a full, sensitive read)
+// ---------------------------------------------------------------------------
+
+fn cmdApproveRead(ctx: *Context, rest: []const [:0]const u8) !u8 {
+    const plan_id = findFlag(rest, "--plan") orelse return failMissingFlag(ctx, "approve-read", "--plan");
+    const note = findFlag(rest, "--note");
+
+    const store = Store.init(ctx);
+    try store.ensureDirs();
+    const lock = try store.acquireLock();
+    defer lock.release();
+
+    const loaded = (try plan.load(store, plan_id)) orelse return failPlanNotFound(ctx, "approve-read", plan_id);
+    defer loaded.deinit();
+    var p = loaded.value;
+
+    if (!eq(p.action, "read")) {
+        try ctx.fail("approve-read", .{
+            .kind = .plan_state_error,
+            .message = "this is not a read plan; use approve for write plans",
+            .risk_level = p.risk_level,
+            .next_action = "run `nbxg approve --plan <plan_id>` for a write plan",
+        });
+        return exit_client;
+    }
+    if (!eq(p.status, plan.status_pending_approval)) {
+        try ctx.fail("approve-read", .{
+            .kind = .plan_state_error,
+            .message = "read plan is not awaiting approval",
+            .risk_level = p.risk_level,
+            .next_action = "only read plans in 'pending_approval' can be approved",
+        });
+        return exit_client;
+    }
+
+    const now_ns = ctx.nowNanos();
+    const a: approval.Approval = .{
+        .approval_id = try ids.genId(ctx.arena, "appr", now_ns),
+        .plan_id = p.plan_id,
+        .plan_hash = p.plan_hash,
+        .resource_type = p.resource_type,
+        .resource_id = p.resource_id,
+        .risk_level = p.risk_level,
+        .status = approval.status_approved,
+        .approver = ctx.env.get("USER") orelse "cli",
+        .created_at = nsToSecs(now_ns),
+        .note = note,
+    };
+    try approval.save(store, a);
+
+    p.status = plan.status_approved;
+    p.approval_id = a.approval_id;
+    try plan.save(store, p);
+
+    try audit.append(store, .{
+        .ts = a.created_at,
+        .request_id = try ids.genId(ctx.arena, "req", now_ns),
+        .event = "read_approved",
+        .plan_id = p.plan_id,
+        .approval_id = a.approval_id,
+        .resource_type = p.resource_type,
+        .resource_id = p.resource_id,
+        .risk_level = p.risk_level,
+    });
+
+    try ctx.ok("approve-read", .{
+        .approval = a,
+        .plan_status = p.status,
+        .next_action = "run `nbxg get <type> <id> --fields all --plan <plan_id>` (or `inspect`) to disclose the full object",
     });
     return exit_ok;
 }
@@ -1087,6 +1476,15 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
     const loaded = (try plan.load(store, plan_id)) orelse return failPlanNotFound(ctx, "apply", plan_id);
     defer loaded.deinit();
     var p = loaded.value;
+
+    if (eq(p.action, "read")) {
+        try ctx.fail("apply", .{
+            .kind = .plan_state_error,
+            .message = "read plans are not applied; they authorize a full read",
+            .next_action = "run `nbxg get <type> <id> --fields all --plan <plan_id>` instead",
+        });
+        return exit_client;
+    }
 
     if (eq(p.status, plan.status_applied)) {
         try ctx.fail("apply", .{

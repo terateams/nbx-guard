@@ -7,14 +7,16 @@
 nbxg version                          打印版本与当前生效配置
 nbxg help                             显示帮助
 nbxg doctor [--skill <dir>]           自检：安装的二进制与 SKILL.md/源码是否一致（离线）
-nbxg get <type> <id>                  读取资源（只读）
-nbxg inspect <type> <id>              读取资源并标注字段策略
+nbxg get <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]
+                                      读取资源；basic（默认）脱敏读敏感字段，all 需读审批
+nbxg inspect <type> <id> [--fields basic|all]  读取资源并标注读/写字段策略
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：可写字段 / 输入输出 schema，实时对齐 NetBox
 nbxg export <type> [选项]             只读导出/快照匹配资源（含来源元数据）
 nbxg snapshot <type> <id> [--out p]   只读快照单个资源（含来源元数据）
 nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
 nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
+nbxg approve-read --plan <id> [--note x]  审批一次敏感对象的整体读取（绑定 plan_hash）
 nbxg reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）
 nbxg apply --plan <id>                先备份，再应用一个已审批/低风险的 plan
 nbxg restore --backup <id>            从备份快照回滚资源
@@ -29,7 +31,7 @@ nbxg list <plans|approvals|backups>   列出本地状态
 
 ## `help`
 
-打印用法、命令列表、支持的资源类型、允许/高风险字段列表，以及可识别的环境变量。
+打印用法、命令列表、支持的资源类型、允许/高风险**写**字段、**读敏感**字段列表，以及可识别的环境变量。
 也可用 `--help` / `-h`。不带参数运行时打印帮助。
 
 ## `doctor [--skill <dir>]`
@@ -59,14 +61,30 @@ nbxg doctor
 nbxg doctor --skill ~/.agents/skills/nbx-guard
 ```
 
-## `get <type> <id>`
+## `get <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]`
 
-从 NetBox 读取一个资源，原样返回在 `data.resource` 下。只读。需要 token。
+从 NetBox 读取一个资源，返回在 `data.resource` 下。需要 token。读取面**分级**（默认最小化）：
 
-## `inspect <type> <id>`
+- `--fields basic`（**默认**）：返回对象，但把**读敏感字段**（`phone`、`email`、`comments`、
+  `custom_fields`、`tenant`，可由 `NBX_GUARD_READ_SENSITIVE_FIELDS` 扩展）替换为
+  `[redacted: read approval required]`。`data.read_policy.redacted_fields` 列出被脱敏的字段。低风险。
+- `--fields all`：请求整对象。若对象含读敏感字段，则默认拒绝（`needs_approval`），需走读审批：
+  1. `--plan-read`：创建一个读 plan（`rplan_…`，`status: pending_approval`）并返回脱敏预览。
+  2. `nbxg approve-read --plan <plan_id>`：人工审批（绑定 `plan_hash`）。
+  3. `nbxg get <type> <id> --fields all --plan <plan_id>`：披露整对象（写 `read_served` 审计）。
 
-与 `get` 类似，但在响应中标注字段策略（`allowed_fields`、`high_risk_fields`），让 agent
-能看到自己可以提议哪些字段。需要 token。
+```sh
+nbxg get device 123                                  # basic：敏感字段脱敏
+nbxg get device 123 --fields all --plan-read         # 创建读 plan
+nbxg approve-read --plan rplan_...                    # 人工审批
+nbxg get device 123 --fields all --plan rplan_...     # 披露整对象
+```
+
+## `inspect <type> <id> [--fields basic|all]`
+
+与 `get` 相同的读取分级，但额外在响应中标注**写**字段策略（`policy.allowed_fields`、
+`policy.high_risk_fields`）以及**读**策略（`read_policy`），让 agent 能同时看到自己可读到什么、
+可提议改什么。需要 token。
 
 ## `list-resources <type> [选项]`
 
@@ -212,10 +230,16 @@ nbxg plan vlan 10 --set custom_fields='{"x":1}'      # JSON 对象
 审批一个处于 `pending_approval` 的 plan。创建一份绑定到该 plan 的 `plan_hash` 的
 审批记录，把 plan 推进到 `approved`，并追加一条 `approved` 审计记录。审批者取自
 `$USER`（否则为 `cli`）。审批一个并不在等待审批的 plan 会失败，返回 `plan_state_error`。
+审批一个**读 plan** 会被拒绝（提示改用 `approve-read`）。
 
-## `reject --plan <id> [--note <text>]`
+## `approve-read --plan <id> [--note <text>]`
 
-驳回一个 plan，把它置为 `rejected`，并追加一条 `rejected` 审计记录。被驳回的 plan
+审批一个由 `get/inspect <type> <id> --fields all --plan-read` 创建的**读 plan**（`action: read`，
+`status: pending_approval`）。与 `approve` 同源：创建一份绑定 `plan_hash` 的审批记录，把读 plan
+推进到 `approved`，并追加一条 `read_approved` 审计记录。之后 `get … --fields all --plan <plan_id>`
+即可披露整对象。审批一个写 plan 会被拒绝（提示改用 `approve`）。
+
+## `reject --plan <id> [--note <text>]`驳回一个 plan，把它置为 `rejected`，并追加一条 `rejected` 审计记录。被驳回的 plan
 之后再 `apply` 会被拒绝（`plan_state_error`）。已经 `applied` 的 plan 不能被驳回。
 驳回者取自 `$USER`（否则为 `cli`）。
 
@@ -223,18 +247,19 @@ nbxg plan vlan 10 --set custom_fields='{"x":1}'      # JSON 对象
 
 应用一个 plan。需要 token。步骤：
 
-1. 若 plan 已是 `applied`，拒绝（`plan_state_error`）。
-2. 若 plan 已被 `rejected`，拒绝（`plan_state_error`）。
-3. 若高风险 plan 尚未 `approved`，拒绝（`not_approved`）。
-4. 重新计算 `plan_hash` 并与存储值比对，检测 plan 文件被篡改；高风险 plan 还会校验
+1. 若 plan 是**读 plan**（`action: read`），拒绝（`plan_state_error`，提示用 `get … --plan`）。
+2. 若 plan 已是 `applied`，拒绝（`plan_state_error`）。
+3. 若 plan 已被 `rejected`，拒绝（`plan_state_error`）。
+4. 若高风险 plan 尚未 `approved`，拒绝（`not_approved`）。
+5. 重新计算 `plan_hash` 并与存储值比对，检测 plan 文件被篡改；高风险 plan 还会校验
    审批记录绑定的是同一个 `plan_hash`（不一致则 `conflict`）。
-5. 针对已存储的 changes 重新校验策略。
-6. 获取当前资源；若被改动字段的当前值与 plan 记录的基线值不一致（外部漂移），
+6. 针对已存储的 changes 重新校验策略。
+7. 获取当前资源；若被改动字段的当前值与 plan 记录的基线值不一致（外部漂移），
    在写入任何备份或变更之前拒绝（`conflict`）。
-7. 写入一份 **backup**（快照 + 原值）。
-8. 用 changes 对 NetBox 执行 `PATCH`。
-9. 成功时：把 plan 标记为 `applied`，关联 `backup_id`，追加一条 `applied` 审计记录，
-   并返回一个 `diff`（`before` / `after`）以及更新后的 `resource`。
+8. 写入一份 **backup**（快照 + 原值）。
+9. 用 changes 对 NetBox 执行 `PATCH`。
+10. 成功时：把 plan 标记为 `applied`，关联 `backup_id`，追加一条 `applied` 审计记录，
+    并返回一个 `diff`（`before` / `after`）以及更新后的 `resource`。
 
 如果 NetBox 拒绝该变更或连接失败，会写入一条 `apply_failed` 审计记录，并以
 `netbox_error` 上报。
