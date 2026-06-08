@@ -98,3 +98,8 @@ nbx-guard 会给每个 NetBox 请求加上 `X-NetBox-Branch: <schema_id>` 头。
 创建分支以及运行它的 `sync` / `merge` / `revert` 生命周期，是通过 NetBox 自身的
 Branching API 完成的；这些审批者级别的操作刻意不由本网关暴露。参见
 [架构](./architecture.md#netbox-branching)。
+
+> **排错：token 有效却查不出数据。** 若 `list-resources`/`search` 返回 `count:0`、或 `resolve`
+> 报 `not_found`，但 NetBox UI 里明明有数据——多半是数据在某个**分支**里，而本网关默认查 `main`。
+> 按上面设置 `NBX_GUARD_BRANCHING=1` 与 `NBX_GUARD_BRANCH=<schema_id>` 后重试，并用 `nbxg version`
+> 确认 `data.branch` 已回显。次要可能是 token 用户的对象级权限约束过滤掉了全部结果。

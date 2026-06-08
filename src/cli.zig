@@ -16,7 +16,7 @@ const netbox = @import("netbox.zig");
 const doctor = @import("doctor.zig");
 const config = @import("config.zig");
 
-pub const version = "0.6.0";
+pub const version = "0.6.1";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
@@ -2142,10 +2142,17 @@ fn cmdResolve(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
     // No match: a clean, deterministic "nothing to operate on".
     if (total == 0 or results.len == 0) {
+        // When branch routing is off, an empty read may simply mean the object
+        // lives in a NetBox branch (the query hit `main`). Point the agent at
+        // the branch env vars so it can widen the lookup deliberately.
+        const next_action = if (ctx.config.branching)
+            "broaden with `nbxg search <type> -q <text>`, or re-check the value"
+        else
+            "broaden with `nbxg search <type> -q <text>`, or re-check the value; if the object may live in a NetBox branch, set NBX_GUARD_BRANCHING=1 and NBX_GUARD_BRANCH=<schema_id> and retry";
         try ctx.fail(command, .{
             .kind = .not_found,
             .message = try std.fmt.allocPrint(ctx.arena, "no {s} matches the given selector(s)", .{rt}),
-            .next_action = "broaden with `nbxg search <type> -q <text>`, or re-check the value",
+            .next_action = next_action,
         });
         return exit_client;
     }
@@ -2850,13 +2857,56 @@ fn failNetboxConn(ctx: *Context, command: []const u8, err: anyerror) !u8 {
 }
 
 fn failNetboxStatus(ctx: *Context, command: []const u8, res: netbox.Result) !u8 {
-    const msg = try std.fmt.allocPrint(ctx.arena, "netbox returned HTTP {d}", .{res.status});
+    // Surface NetBox's own error `detail` when present so the agent sees *why*
+    // (e.g. "Invalid v2 token") instead of a bare status code.
+    const detail = netboxDetail(ctx.arena, res.body);
+    const msg = if (detail) |d|
+        try std.fmt.allocPrint(ctx.arena, "netbox returned HTTP {d}: {s}", .{ res.status, d })
+    else
+        try std.fmt.allocPrint(ctx.arena, "netbox returned HTTP {d}", .{res.status});
+
+    // NetBox collapses every authentication AND authorization failure into HTTP
+    // 403 (its TokenAuthentication never sets a WWW-Authenticate header, so DRF
+    // does not emit 401). Only the response body's `detail` disambiguates: an
+    // invalid/expired/disabled token reads like "Invalid v2 token" / "Token
+    // expired", while a valid token whose user lacks model rights reads "You do
+    // not have permission ...". Steer the agent at the credential/permissions
+    // rather than the resource.
+    if (res.status == 401 or res.status == 403) {
+        try ctx.fail(command, .{
+            .kind = .netbox_error,
+            .message = msg,
+            .next_action = "authentication or permission failure: verify NETBOX_TOKEN is the full v2 credential (nbt_<key>.<secret>; the secret is shown only once at creation) and that its NetBox user has the required view/change permission — read message for the NetBox detail",
+        });
+        return exit_upstream;
+    }
+
     try ctx.fail(command, .{
         .kind = if (res.status == 409) .conflict else .netbox_error,
         .message = msg,
         .next_action = "inspect the resource and adjust the plan",
     });
     return exit_upstream;
+}
+
+/// Best-effort extraction of NetBox/DRF's top-level error `detail` string from a
+/// JSON error body. NetBox returns `{"detail": "..."}` for authentication and
+/// permission failures; field-validation errors are field-keyed (no `detail`),
+/// so those safely yield null and the caller falls back to the bare status. Only
+/// the `detail` string is read — never arbitrary field values — so no resource
+/// data is surfaced.
+fn netboxDetail(arena: std.mem.Allocator, body: []const u8) ?[]const u8 {
+    if (body.len == 0) return null;
+    const v = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch return null;
+    const obj = switch (v) {
+        .object => |o| o,
+        else => return null,
+    };
+    const d = obj.get("detail") orelse return null;
+    return switch (d) {
+        .string => |s| if (s.len > 0) s else null,
+        else => null,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -2882,4 +2932,24 @@ test "urlHash16 is a stable 16-hex instance fingerprint" {
     // matches the first 16 hex chars of the full SHA-256 of the same URL
     const full = try ids.sha256Hex(a, "https://netbox.example.com");
     try std.testing.expectEqualStrings(full[0..16], h1);
+}
+
+test "netboxDetail extracts DRF detail and ignores everything else" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The disambiguating case: NetBox 403s carry the reason only in `detail`.
+    try std.testing.expectEqualStrings("Invalid v2 token", netboxDetail(a, "{\"detail\":\"Invalid v2 token\"}").?);
+    try std.testing.expectEqualStrings(
+        "You do not have permission to perform this action.",
+        netboxDetail(a, "{\"detail\":\"You do not have permission to perform this action.\"}").?,
+    );
+    // No `detail` (field-keyed validation error) -> null, so no resource data leaks.
+    try std.testing.expect(netboxDetail(a, "{\"serial\":[\"This field may not be blank.\"]}") == null);
+    // Defensive: empty body, non-JSON, non-object, empty/non-string detail -> null.
+    try std.testing.expect(netboxDetail(a, "") == null);
+    try std.testing.expect(netboxDetail(a, "not json") == null);
+    try std.testing.expect(netboxDetail(a, "[1,2,3]") == null);
+    try std.testing.expect(netboxDetail(a, "{\"detail\":\"\"}") == null);
+    try std.testing.expect(netboxDetail(a, "{\"detail\":42}") == null);
 }

@@ -273,12 +273,29 @@ nbxg describe device --offline         # 仅静态 schema
 | `plan_not_found` / `approval_not_found` / `backup_not_found` | 找不到对应记录 | 用 `list` 核对 id |
 | `plan_state_error` | 计划状态不允许该操作（如重复 apply、已驳回） | 重新 `plan` |
 | `conflict` | **漂移**：plan 之后资源被外部改动 | 重新 `get`/`plan`，**不要**盲目重试 |
-| `netbox_error` | NetBox 返回非 2xx 或不可达 | 检查连通性/权限；读 message |
+| `netbox_error` | NetBox 返回非 2xx 或不可达 | 检查连通性/权限；读 message（认证/权限失败时 NetBox 的 detail 会透传到 message） |
 | `io_error` | 本地状态读写失败 | 检查 `NBX_GUARD_STATE_DIR` 权限 |
 | `not_implemented` | 未支持的能力 | 放弃该路径 |
 
 **退出码**：`0` 成功；`2` 客户端/策略/状态错误（你的请求有问题）；`3` 上游/IO/配置错误
 （NetBox 或环境的问题）。请同时检查退出码与 `.ok`。
+
+### 排错：认证失败（HTTP 403）与"查不出数据"
+
+NetBox 把**认证失败**（token 无效/过期/被禁用、用错鉴权方案）与**权限不足**（token 有效但用户缺
+`view_*`/`change_*` 权限）**都返回 HTTP 403**，仅靠响应体的 `detail` 区分——CLI 已把它透传到
+`error.message`，请据此判断：
+
+- `message` 含 `Invalid v… token` / `Token expired` / `Token disabled` → **凭据问题**。`NETBOX_TOKEN`
+  必须是**完整 v2 串** `nbt_<key>.<secret>`；`<secret>` 仅在创建那一刻显示一次，丢了就重建 token。
+- `message` 含 `You do not have permission …` → **权限问题**。请人工算子给该 token 的用户加上对应模型的
+  view/change 权限。
+
+**token 有效（不再 403）却读到空 / 查不出数据**（`list-resources`/`search` 返回 `count:0`，或
+`resolve` 报 `not_found`）：最常见是**数据在某个 NetBox 分支里**，而本网关默认查 `main`。设
+`NBX_GUARD_BRANCHING=1` 与 `NBX_GUARD_BRANCH=<schema_id>` 后重试（`schema_id` 见分支详情页或
+`GET /api/plugins/branching/branches/`，八字符、不含 `branch_` 前缀；用 `nbxg version` 确认 `data.branch`
+已回显）。次要可能：token 用户的**对象级权限约束**把结果过滤光了。
 
 ---
 

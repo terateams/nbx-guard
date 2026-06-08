@@ -157,6 +157,17 @@ guard_notoken() {
   GRC=$?
   set -e
 }
+# 用 key 合法但 secret 错误的 v2 token 运行，触发 NetBox 的 403（"Invalid v2 token"）。
+# NetBox 把"认证失败"与"权限不足"都压成 403，仅靠响应体 detail 区分；用于校验 CLI 会把
+# detail 透传到 message，并给出指向凭据/权限（而非"检查资源"）的 next_action。
+guard_badtoken() {
+  set +e
+  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" \
+    NETBOX_TOKEN="nbt_badkey000001.deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+    "$GUARD" "$@" 2>/dev/null)
+  GRC=$?
+  set -e
+}
 # 算子扩展运行：通过 NBX_GUARD_EXTRA_RESOURCES / *_FIELDS 让人工算子在默认拒绝之外
 # 显式放行更多受治理类型与字段（site/tenant + facility/tenant 字段）。
 guard_ext() {
@@ -222,7 +233,7 @@ echo "================ 验收用例 ================"
 guard version
 check "version: 退出码 0" "$GRC" "0"
 check "version: ok=true" "$(j '.ok')" "true"
-check "version: 版本号" "$(j '.data.version')" "0.6.0"
+check "version: 版本号" "$(j '.data.version')" "0.6.1"
 check "version: token_configured=true" "$(j '.data.token_configured')" "true"
 
 # 2) help
@@ -668,6 +679,17 @@ check "resolve(扩展类型 site): resolved.id 命中 SITE_ID" "$(j '.data.resol
 guard resolve ip-address
 check "resolve(无选择器): 退出码 2" "$GRC" "2"
 check "resolve(无选择器): invalid_args" "$(j '.error.kind')" "invalid_args"
+
+# 4k) NetBox 认证/权限失败（403）：CLI 必须透传 NetBox 的 detail 并把 next_action 指向
+#     凭据/权限，而不是误导去"检查资源"。NetBox 对认证失败与权限不足都返回 403。
+echo ""
+echo "-- 4k) netbox 403：透传 detail + 指向凭据/权限 --"
+guard_badtoken get device 1
+check "403(坏 token): 退出码 3" "$GRC" "3"
+check "403(坏 token): error.kind=netbox_error" "$(j '.error.kind')" "netbox_error"
+check "403(坏 token): message 含 HTTP 403" "$(j '.error.message | contains("403")')" "true"
+check "403(坏 token): message 透传 NetBox detail" "$(j '.error.message | contains("Invalid")')" "true"
+check "403(坏 token): next_action 指向 NETBOX_TOKEN" "$(j '.error.next_action | contains("NETBOX_TOKEN")')" "true"
 
 # --- 汇总 ------------------------------------------------------------------
 echo ""

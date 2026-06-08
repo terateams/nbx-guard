@@ -297,7 +297,9 @@ nbxg plan vlan 10 --set custom_fields='{"x":1}'      # JSON 对象
     并返回一个 `diff`（`before` / `after`）以及更新后的 `resource`。
 
 如果 NetBox 拒绝该变更或连接失败，会写入一条 `apply_failed` 审计记录，并以
-`netbox_error` 上报。
+`netbox_error` 上报。NetBox 把认证失败与权限不足都返回 HTTP 403，其响应体 `detail`
+会透传到 `error.message`（如 `Invalid v2 token` 表示凭据问题、`You do not have
+permission …` 表示权限问题），据此区分而非盲目重试。
 
 ## `restore --backup <id>`
 
