@@ -179,6 +179,27 @@ guard_extfield() {
   GRC=$?
   set -e
 }
+# 算子改用 ~/.nbx-guard/config.json 等价物（NBX_GUARD_CONFIG 指向临时 JSON 文件）扩展治理，
+# 不再导出三个 env 变量。用于校验：配置文件与 env 行为完全一致。
+CFG_FILE="$STATE_DIR/operator-config.json"
+guard_cfgfile() {
+  set +e
+  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
+    NBX_GUARD_CONFIG="$CFG_FILE" \
+    "$GUARD" "$@" 2>/dev/null)
+  GRC=$?
+  set -e
+}
+# 配置文件 + env 并存：file 提供 site 类型，env 追加 tenant 类型，校验二者取并集。
+guard_cfgunion() {
+  set +e
+  GOUT=$(NBX_GUARD_STATE_DIR="$STATE_DIR" NETBOX_URL="$BASE" NETBOX_TOKEN="$TOKEN" \
+    NBX_GUARD_CONFIG="$CFG_FILE" \
+    NBX_GUARD_EXTRA_RESOURCES="tenant=tenancy/tenants" \
+    "$GUARD" "$@" 2>/dev/null)
+  GRC=$?
+  set -e
+}
 j() { printf '%s' "$GOUT" | jq -r "$1"; }
 # 直接查 NetBox（校验副作用）
 nb_field() { curl -fsS -H "$NB_AUTH" "$BASE/api/ipam/ip-addresses/$IP_ID/" | jq -r "$1"; }
@@ -201,7 +222,7 @@ echo "================ 验收用例 ================"
 guard version
 check "version: 退出码 0" "$GRC" "0"
 check "version: ok=true" "$(j '.ok')" "true"
-check "version: 版本号" "$(j '.data.version')" "0.4.1"
+check "version: 版本号" "$(j '.data.version')" "0.5.0"
 check "version: token_configured=true" "$(j '.data.token_configured')" "true"
 
 # 2) help
@@ -388,6 +409,66 @@ check "plan(算子放行 dns_name): 低风险可直接应用" "$(j '.data.plan.r
 guard help
 check "help(无 env): high_risk_fields 不含 serial" \
   "$(j '.data.high_risk_fields | index("serial") != null')" "false"
+
+# 4h) 配置文件治理扩展（~/.nbx-guard/config.json 等价物，经 NBX_GUARD_CONFIG）：
+#     与三个 env 变量行为完全一致，且 file 与 env 取并集；坏 JSON 走 config_error。
+mkdir -p "$STATE_DIR"
+cat > "$CFG_FILE" <<'JSON'
+{
+  "extra_resources": { "site": "dcim/sites" },
+  "allowed_fields": ["facility"],
+  "high_risk_fields": ["tenant"]
+}
+JSON
+
+# describe 目录纳入配置文件扩展类型
+guard_cfgfile describe --offline
+check "cfg describe(目录): 含配置文件扩展类型 site" \
+  "$(j '.data.resource_types | map(.resource_type) | index("site") != null')" "true"
+
+# describe site：合成文档 + 实时同步，facility 由配置文件放行
+guard_cfgfile describe site --source options
+check "cfg describe site: endpoint=dcim/sites" "$(j '.data.netbox_endpoint')" "dcim/sites"
+check "cfg describe site: 实时同步 status=ok" "$(j '.data.netbox_sync.status')" "ok"
+check "cfg describe site: facility 为低风险（配置文件放行）" \
+  "$(j '.data.fields[] | select(.name=="facility") | .class')" "allowed"
+
+# 写路径：配置文件放行的 facility 走 plan->apply（与 env 完全一致）
+guard_cfgfile plan site "$SITE_ID" --set facility="Cfg Bldg"
+check "cfg plan site facility: ok=true" "$(j '.ok')" "true"
+check "cfg plan site facility: requires_approval=false" "$(j '.data.plan.requires_approval')" "false"
+CFG_PLAN=$(j '.data.plan.plan_id')
+guard_cfgfile apply --plan "$CFG_PLAN"
+check "cfg apply site facility: status=applied" "$(j '.data.status')" "applied"
+check "cfg apply site facility: NetBox 侧实写" \
+  "$(curl -fsS -H "$NB_AUTH" "$BASE/api/dcim/sites/$SITE_ID/" | jq -r '.facility')" "Cfg Bldg"
+
+# 配置文件 high_risk_fields 生效：tenant 字段需审批
+guard_cfgfile plan site "$SITE_ID" --set tenant=1
+check "cfg plan site tenant(配置文件高风险): requires_approval=true" "$(j '.data.plan.requires_approval')" "true"
+
+# 默认拒绝不可削弱：身份字段 name 仍被拒
+guard_cfgfile plan site "$SITE_ID" --set name=renamed
+check "cfg plan site name: policy_denied" "$(j '.error.kind')" "policy_denied"
+
+# 并集：file 提供 site，env 追加 tenant，describe 目录应同时含两者
+guard_cfgunion describe --offline
+check "cfg+env 并集: 目录含 site（来自文件）" \
+  "$(j '.data.resource_types | map(.resource_type) | index("site") != null')" "true"
+check "cfg+env 并集: 目录含 tenant（来自 env）" \
+  "$(j '.data.resource_types | map(.resource_type) | index("tenant") != null')" "true"
+
+# 坏 JSON：任何命令都应以 config_error 退出 3
+echo 'not json{' > "$CFG_FILE"
+guard_cfgfile describe --offline
+check "cfg 坏 JSON: 退出码 3" "$GRC" "3"
+check "cfg 坏 JSON: error.kind=config_error" "$(j '.error.kind')" "config_error"
+rm -f "$CFG_FILE" 2>/dev/null || true
+
+# 显式 NBX_GUARD_CONFIG 指向不存在文件：config_error
+guard_cfgfile describe --offline
+check "cfg 文件缺失(显式路径): 退出码 3" "$GRC" "3"
+check "cfg 文件缺失(显式路径): config_error" "$(j '.error.kind')" "config_error"
 
 # 5) token 门禁：不带 token 的 get 应被拒
 guard_notoken get ip-address "$IP_ID"

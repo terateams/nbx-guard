@@ -61,12 +61,18 @@ bash scripts/installer.sh
 | `NBX_GUARD_ALLOWED_FIELDS` | 否 | — | **算子专用**：追加低风险字段（逗号/空格分隔）。 |
 | `NBX_GUARD_HIGH_RISK_FIELDS` | 否 | — | **算子专用**：追加高风险字段（需审批）。 |
 | `NBX_GUARD_READ_SENSITIVE_FIELDS` | 否 | — | **算子专用**：追加读敏感字段（整对象读取需 `approve-read`）。Agent 不应设置。 |
+| `NBX_GUARD_CONFIG` | 否 | `~/.nbx-guard/config.json` | **算子专用**：治理扩展配置文件路径覆盖。 |
 
 > token 绝不会被写入状态目录，也绝不会在输出里打印。`nbxg version` 只报告 `token_configured: true|false`。
 
 > `NBX_GUARD_EXTRA_RESOURCES` / `*_FIELDS` 由**人工运维方**控制，用于在默认拒绝之外显式放行更多
 > 类型/字段；**Agent 不要自行设置这些变量**。默认拒绝、内置高风险分类与全部工作流控制（plan/审批/
 > 备份/漂移/审计/还原）始终不变。遇到「类型/字段不在治理范围」时，应**提示人工算子**去配置，而不是绕过。
+
+> **算子配置文件**：上面三个治理扩展变量也可等价地写进 `~/.nbx-guard/config.json`
+> （`{ "extra_resources": {"site":"dcim/sites"}, "allowed_fields": ["serial"], "high_risk_fields": ["tenant"] }`），
+> 与环境变量取并集。**密钥（`NETBOX_TOKEN`）只走环境变量，绝不写进此文件。** 这同样是算子的职责，
+> Agent 不应创建或修改该文件。
 
 ---
 
@@ -154,8 +160,9 @@ nbxg snapshot device 123 --out snapshots/device-123.json
 
 > **需要的字段被 `policy_denied`？** 不要反复重试，也不要自行设置 env 绕过。请**提示人工算子**用
 > `NBX_GUARD_ALLOWED_FIELDS`（低风险）或 `NBX_GUARD_HIGH_RISK_FIELDS`（需审批）放行该字段（例如设备
-> `serial` 序列号）。放行后该字段会**自动出现在** `describe`/`inspect`/`help` 的字段清单中（并实时标注
-> `present_in_netbox`），你即可照常 `plan → apply`，无需改源码。
+> `serial` 序列号），或等价地写进 `~/.nbx-guard/config.json`。放行后该字段会**自动出现在**
+> `describe`/`inspect`/`help` 的字段清单中（并实时标注 `present_in_netbox`），你即可照常
+> `plan → apply`，无需改源码。
 
 `--set` 取值解析：默认按**字符串**；合法 JSON 的数组/对象按 JSON 解析。
 
@@ -345,8 +352,9 @@ nbxg list backups               # 已存储的备份
 3. 不要在未经授权时自行 `approve` 高风险计划。
 4. 不要忽略退出码 `2/3` 当作成功。
 5. 不要自行设置 `NBX_GUARD_EXTRA_RESOURCES` / `NBX_GUARD_ALLOWED_FIELDS` /
-   `NBX_GUARD_HIGH_RISK_FIELDS` 来绕过默认拒绝——这些是人工算子的职责。遇到类型/字段不在
-   治理范围（`invalid_args` 未知类型、或 `policy_denied`），应**请人工算子去配置**。
+   `NBX_GUARD_HIGH_RISK_FIELDS`，也不要自行创建/修改 `~/.nbx-guard/config.json` 来绕过默认拒绝
+   ——这些是人工算子的职责。遇到类型/字段不在治理范围（`invalid_args` 未知类型、或
+   `policy_denied`），应**请人工算子去配置**。
 
 ---
 

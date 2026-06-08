@@ -123,6 +123,38 @@ nbxg describe device          # serial 现在出现在字段清单，present_in_
 nbxg plan device 1 --set serial=NEW-SN-001   # 低风险，可直接 apply（自动备份）
 ```
 
+### 用配置文件代替环境变量（`~/.nbx-guard/config.json`）
+
+不想导出三个环境变量时，算子可以把同样的治理扩展写进一个 JSON 配置文件。默认路径是
+`~/.nbx-guard/config.json`（可用环境变量 `NBX_GUARD_CONFIG` 指向其它路径）：
+
+```json
+{
+  "extra_resources":  { "site": "dcim/sites", "tenant": "tenancy/tenants" },
+  "allowed_fields":   ["serial", "asset_tag"],
+  "high_risk_fields": ["tenant"]
+}
+```
+
+- 三个键分别等价于 `NBX_GUARD_EXTRA_RESOURCES` / `NBX_GUARD_ALLOWED_FIELDS` /
+  `NBX_GUARD_HIGH_RISK_FIELDS`；行为、fail-safe 约束、自描述一致性与环境变量**完全相同**。
+- **只放治理扩展，不放密钥**：`NETBOX_URL` / `NETBOX_TOKEN` 仍只从环境变量读取，绝不写进此文件。
+- **文件与环境变量取并集**（都是增量放行）；`extra_resources` 键冲突时**环境变量优先**。
+- 路径解析：显式 `NBX_GUARD_CONFIG`（若设置但文件不存在 → `config_error`）→ 否则默认
+  `~/.nbx-guard/config.json`（不存在则静默跳过，完全向后兼容）。
+- JSON 格式非法 → 以 `config_error`（退出码 3）失败并给出修复提示，绝不静默忽略。
+- 注意：`~/.nbx-guard/`（家目录，算子配置）与默认**状态目录** `.nbx-guard/`（项目本地，
+  plans/backups/审计）是两个不同目录。
+
+```sh
+mkdir -p ~/.nbx-guard
+cat > ~/.nbx-guard/config.json <<'JSON'
+{ "extra_resources": { "site": "dcim/sites" }, "allowed_fields": ["serial"] }
+JSON
+nbxg describe device          # serial 已出现（与 env 等价）
+nbxg describe site            # 扩展类型可见
+```
+
 ## 运行时查看策略
 
 - `nbxg help` 列出允许字段、高风险字段以及支持的资源类型。

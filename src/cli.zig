@@ -14,8 +14,9 @@ const backup = @import("backup.zig");
 const audit = @import("audit.zig");
 const netbox = @import("netbox.zig");
 const doctor = @import("doctor.zig");
+const config = @import("config.zig");
 
-pub const version = "0.4.1";
+pub const version = "0.5.0";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
@@ -23,6 +24,7 @@ const exit_client: u8 = 2;
 const exit_upstream: u8 = 3;
 
 pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
+    if (try applyOperatorConfig(ctx)) |code| return code;
     if (args.len < 2) {
         try printHelp(ctx);
         return exit_ok;
@@ -76,6 +78,58 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
         .next_action = "run `nbxg help` to list supported commands",
     });
     return exit_client;
+}
+
+/// Load the optional operator config file and merge its governance extensions into
+/// `ctx.env`, so the rest of the run reads them exactly like the NBX_GUARD_* env
+/// vars. Resolution: `NBX_GUARD_CONFIG` (explicit; must exist) else
+/// `$HOME/.nbx-guard/config.json` (missing = silent no-op, fully backward
+/// compatible). Returns a non-null exit code only when an explicit/invalid config
+/// must abort the run (the failure envelope is already emitted).
+fn applyOperatorConfig(ctx: *Context) !?u8 {
+    const explicit = blk: {
+        const v = ctx.env.get("NBX_GUARD_CONFIG") orelse break :blk null;
+        break :blk if (v.len == 0) null else v;
+    };
+    const path = explicit orelse home_path: {
+        const home = ctx.env.get("HOME") orelse return null;
+        if (home.len == 0) return null;
+        break :home_path try std.fs.path.join(ctx.arena, &.{ home, ".nbx-guard", "config.json" });
+    };
+
+    const bytes = std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(1 << 20)) catch |err| switch (err) {
+        error.FileNotFound => {
+            if (explicit != null) {
+                try ctx.fail("config", .{
+                    .kind = .config_error,
+                    .message = "NBX_GUARD_CONFIG points to a file that does not exist",
+                    .next_action = "create the JSON file or unset NBX_GUARD_CONFIG",
+                });
+                return exit_upstream;
+            }
+            return null;
+        },
+        else => {
+            try ctx.fail("config", .{
+                .kind = .config_error,
+                .message = "failed to read operator config file",
+                .next_action = "check the path and permissions of ~/.nbx-guard/config.json (or NBX_GUARD_CONFIG)",
+            });
+            return exit_upstream;
+        },
+    };
+
+    const ext = config.parseExtJson(ctx.arena, bytes) catch {
+        try ctx.fail("config", .{
+            .kind = .config_error,
+            .message = "invalid operator config JSON (~/.nbx-guard/config.json)",
+            .next_action = "fix the JSON: object root with optional extra_resources (object of \"type\":\"path\"), allowed_fields ([string]) and high_risk_fields ([string]); keep NETBOX_URL/NETBOX_TOKEN in the environment, not here",
+        });
+        return exit_upstream;
+    };
+    if (ext.isEmpty()) return null;
+    ctx.env = try config.mergeEnv(ctx.arena, ctx.env, ext);
+    return null;
 }
 
 // ---------------------------------------------------------------------------
