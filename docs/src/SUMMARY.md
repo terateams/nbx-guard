@@ -10,6 +10,7 @@
 - [策略](./policy.md)
 - [命令参考](./commands.md)
 - [工作流](./workflows.md)
+- [实战案例](./cookbook.md)
 - [响应格式](./responses.md)
 
 # 参考

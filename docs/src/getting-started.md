@@ -93,4 +93,4 @@ nbxg restore --backup bkp_...
 ```
 
 低风险字段无需审批即可应用；高风险字段必须先经过审批。完整的低风险与高风险
-路径见[工作流](./workflows.md)。
+路径见[工作流](./workflows.md)，更多贴近运维的成套案例见[实战案例](./cookbook.md)。

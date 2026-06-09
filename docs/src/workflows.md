@@ -83,3 +83,6 @@ nbxg list backups          # 已存储的 backups
    - `high` 风险 → 请人工 `approve`，然后 `apply`。
 4. 保留返回的 `backup_id`，以便日后 `restore` 该变更。
 5. 用 `audit` / `request_id` 确认并追溯结果。
+
+> 想要更贴近运维日常的成套案例（发现 id、读敏感、取证、扩权、分支批改、排错、回滚），
+> 见[实战案例](./cookbook.md)。
