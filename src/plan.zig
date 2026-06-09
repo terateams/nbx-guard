@@ -48,6 +48,13 @@ fn parseScalar(arena: std.mem.Allocator, s: []const u8) std.json.Value {
         std.json.Value{ .string = s };
 }
 
+/// Parse a single `--set` value into JSON (numbers, bools, arrays, objects when
+/// it parses, otherwise a string). Exposed so the CLI can merge `--set` pairs
+/// into the same object it builds from a `--data` JSON document.
+pub fn scalarValue(arena: std.mem.Allocator, s: []const u8) std.json.Value {
+    return parseScalar(arena, s);
+}
+
 /// Field names present in a changes object, in insertion order.
 pub fn changeFields(arena: std.mem.Allocator, changes: std.json.Value) ![]const []const u8 {
     const obj = switch (changes) {

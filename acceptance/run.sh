@@ -247,7 +247,7 @@ echo "================ 验收用例 ================"
 guard version
 check "version: 退出码 0" "$GRC" "0"
 check "version: ok=true" "$(j '.ok')" "true"
-check "version: 版本号" "$(j '.data.version')" "0.9.0"
+check "version: 版本号" "$(j '.data.version')" "0.10.0"
 check "version: token_configured=true" "$(j '.data.token_configured')" "true"
 
 # 2) help
@@ -521,6 +521,25 @@ guard restore --backup "$BKP"
 check "restore: 退出码 0" "$GRC" "0"
 check "restore: ok=true" "$(j '.ok')" "true"
 check "restore: NetBox 侧 description 已还原" "$(nb_field '.description')" "seed"
+
+# 8b) --data：字段也能用一整段 JSON 传（与 --set 同一条管道）。仅建 plan，不改 NetBox。
+guard plan ip-address "$IP_ID" --data '{"description":"acceptance-data"}'
+check "plan(--data 内联): 退出码 0" "$GRC" "0"
+check "plan(--data 内联): status=planned" "$(j '.data.plan.status')" "planned"
+check "plan(--data 内联): changes.description" "$(j '.data.plan.changes.description')" "acceptance-data"
+
+echo '{"description":"acceptance-stdin"}' | guard plan ip-address "$IP_ID" --data @-
+check "plan(--data @- stdin): 退出码 0" "$GRC" "0"
+check "plan(--data @- stdin): changes.description" "$(j '.data.plan.changes.description')" "acceptance-stdin"
+
+# --data 打底 + --set 覆盖（从左到右，后者覆盖前者）
+guard plan ip-address "$IP_ID" --data '{"description":"from-data"}' --set description=from-set
+check "plan(--data+--set 覆盖): changes.description" "$(j '.data.plan.changes.description')" "from-set"
+
+# --data 顶层非对象 -> invalid_args（退出码 2）
+guard plan ip-address "$IP_ID" --data '[1,2,3]'
+check "plan(--data 非对象): 退出码 2" "$GRC" "2"
+check "plan(--data 非对象): error.kind=invalid_args" "$(j '.error.kind')" "invalid_args"
 
 # 9) plan 高风险（status）—— 需要审批
 guard plan ip-address "$IP_ID" --set status=deprecated

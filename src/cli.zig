@@ -16,7 +16,7 @@ const netbox = @import("netbox.zig");
 const doctor = @import("doctor.zig");
 const config = @import("config.zig");
 
-pub const version = "0.9.0";
+pub const version = "0.10.0";
 
 // Exit codes: 0 ok, 2 client/policy/state error, 3 upstream/io/config error.
 const exit_ok: u8 = 0;
@@ -384,8 +384,8 @@ fn printHelp(ctx: *Context) !void {
             "                                 Read-only snapshot of one resource; sensitive fields redacted unless disclosed via a read approval",
             "describe [<type>] [--source options|openapi] [--refresh] [--offline]",
             "                                 Self-describe a type: action, fields, I/O schema (live-synced to NetBox)",
-            "plan <type> <id> --set k=v ...   Create a change plan (policy + risk checked)",
-            "create <type> --set k=v ...      Plan creating a NEW object (opt-in type; always needs approval)",
+            "plan <type> <id> --set k=v ... | --data '{...}'   Create a change plan (policy + risk checked)",
+            "create <type> --set k=v ... | --data '{...}'      Plan creating a NEW object (opt-in type; always needs approval)",
             "approve --plan <id> [--note x]   Approve a high-risk plan (binds plan_hash)",
             "approve-read --plan <id> [--note x]  Approve a full read of a sensitive object (binds plan_hash)",
             "reject --plan <id> [--note x]    Reject a plan so it can never be applied",
@@ -1206,7 +1206,7 @@ fn cmdDescribe(ctx: *Context, rest: []const [:0]const u8) !u8 {
         }
     }
 
-    const usage = try std.fmt.allocPrint(ctx.arena, "nbxg plan {s} <id> --set <field>=<value> ...", .{doc.key});
+    const usage = try std.fmt.allocPrint(ctx.arena, "nbxg plan {s} <id> --set <field>=<value> ...  (or --data '{{...}}')", .{doc.key});
     try ctx.ok("describe", .{
         .resource_type = doc.key,
         .netbox_endpoint = doc.netbox_endpoint,
@@ -1216,7 +1216,7 @@ fn cmdDescribe(ctx: *Context, rest: []const [:0]const u8) !u8 {
         .creatable = policy.creatableAllowed(ctx.env, doc.key),
         .create = .{
             .enabled = policy.creatableAllowed(ctx.env, doc.key),
-            .command = "nbxg create <type> --set field=value ...  (then approve + apply)",
+            .command = "nbxg create <type> --set field=value ...  (or --data '{...}'; then approve + apply)",
             .note = "create requires operator opt-in (creatable_resources / NBX_GUARD_CREATABLE_RESOURCES) and always needs approval; fields pass through to NetBox, so set the required identifying fields (e.g. name, slug).",
         },
         .denied_actions = &[_][]const u8{ "delete", "bulk_delete" },
@@ -2000,8 +2000,8 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
     if (rest.len < 2) {
         try ctx.fail("plan", .{
             .kind = .invalid_args,
-            .message = "expected <type> <id> --set field=value ...",
-            .next_action = "see `nbxg describe <type>` for fields; example: nbxg plan device 1 --set description=\"edge router\"",
+            .message = "expected <type> <id> --set field=value ... (or --data '{...}')",
+            .next_action = "see `nbxg describe <type>` for fields; e.g. nbxg plan device 1 --set description=\"edge router\"  or  nbxg plan device 1 --data '{\"description\":\"edge router\"}'",
         });
         return exit_client;
     }
@@ -2009,18 +2009,23 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
     const rid = rest[1];
     if (netbox.endpointFor(ctx.env, rtype) == null) return failUnknownType(ctx, "plan", rtype);
 
-    const changes = try parseSet(ctx.arena, rest[2..]);
-    if (changes.len == 0) {
+    const changes_value = switch (try collectChanges(ctx, rest[2..])) {
+        .bad => |b| {
+            try ctx.fail("plan", .{ .kind = .invalid_args, .message = b.message, .next_action = b.next_action });
+            return exit_client;
+        },
+        .object => |o| o,
+    };
+    const fields = try plan.changeFields(ctx.arena, changes_value);
+    if (fields.len == 0) {
         try ctx.fail("plan", .{
             .kind = .invalid_args,
-            .message = "no changes given; use --set field=value",
-            .next_action = "add at least one --set field=value",
+            .message = "no changes given; use --set field=value or --data '{...}'",
+            .next_action = "add at least one field, e.g. --set description=\"edge router\"  or  --data '{\"description\":\"edge router\"}'",
         });
         return exit_client;
     }
 
-    const changes_value = try plan.buildChanges(ctx.arena, changes);
-    const fields = try plan.changeFields(ctx.arena, changes_value);
     const eval = try policy.evaluateEnv(ctx.arena, ctx.env, fields);
 
     if (eval.decision == .deny) {
@@ -2125,8 +2130,8 @@ fn cmdCreate(ctx: *Context, rest: []const [:0]const u8) !u8 {
     if (rest.len < 1) {
         try ctx.fail("create", .{
             .kind = .invalid_args,
-            .message = "expected <type> --set field=value ...",
-            .next_action = "example: nbxg create site --set name=POP3 --set slug=pop3   (see `nbxg describe <type>` for fields)",
+            .message = "expected <type> --set field=value ... (or --data '{...}')",
+            .next_action = "e.g. nbxg create site --set name=POP3 --set slug=pop3   or   nbxg create site --data '{\"name\":\"POP3\",\"slug\":\"pop3\"}'   (see `nbxg describe <type>` for fields)",
         });
         return exit_client;
     }
@@ -2148,16 +2153,21 @@ fn cmdCreate(ctx: *Context, rest: []const [:0]const u8) !u8 {
         return exit_client;
     }
 
-    const changes = try parseSet(ctx.arena, rest[1..]);
-    if (changes.len == 0) {
+    const changes_value = switch (try collectChanges(ctx, rest[1..])) {
+        .bad => |b| {
+            try ctx.fail("create", .{ .kind = .invalid_args, .message = b.message, .next_action = b.next_action });
+            return exit_client;
+        },
+        .object => |o| o,
+    };
+    if ((try plan.changeFields(ctx.arena, changes_value)).len == 0) {
         try ctx.fail("create", .{
             .kind = .invalid_args,
-            .message = "no fields given; use --set field=value",
-            .next_action = "add at least one --set field=value (NetBox enforces which fields are required)",
+            .message = "no fields given; use --set field=value or --data '{...}'",
+            .next_action = "add at least one field, e.g. --set name=POP3  or  --data '{\"name\":\"POP3\",\"slug\":\"pop3\"}' (NetBox enforces which fields are required)",
         });
         return exit_client;
     }
-    const changes_value = try plan.buildChanges(ctx.arena, changes);
 
     const store = Store.init(ctx);
     try store.ensureDirs();
@@ -3975,6 +3985,125 @@ fn parseSet(arena: std.mem.Allocator, args: []const [:0]const u8) ![]plan.Change
     return list.toOwnedSlice(arena);
 }
 
+const BadInput = struct { message: []const u8, next_action: []const u8 };
+
+/// Result of collecting field changes: either the merged JSON object or a
+/// caller-renderable error envelope (bad JSON, wrong shape, unreadable source).
+const CollectedChanges = union(enum) {
+    object: std.json.Value,
+    bad: BadInput,
+};
+
+/// Collect the field changes for `plan` / `create` from three interchangeable,
+/// combinable sources, read left to right (later values win):
+///   --set k=v  /  bare k=v            one field at a time (value JSON-parsed, else string)
+///   --data '<json object>'            an inline JSON object of fields
+///   --data @file  /  --data-file file a JSON object read from a file
+///   --data @-     /  --data-file -    a JSON object read from stdin
+/// The merged result is the same JSON object the rest of the pipeline already
+/// consumes, so policy, risk, plan_hash, drift, backup and audit behave
+/// identically no matter how the fields were supplied.
+fn collectChanges(ctx: *Context, args: []const [:0]const u8) !CollectedChanges {
+    var obj: std.json.ObjectMap = .empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        var data_arg: ?[]const u8 = null;
+        var force_file = false;
+        if (eq(a, "--data")) {
+            if (i + 1 >= args.len) return missingDataValue();
+            i += 1;
+            data_arg = args[i];
+        } else if (std.mem.startsWith(u8, a, "--data=")) {
+            data_arg = a["--data=".len..];
+        } else if (eq(a, "--data-file")) {
+            if (i + 1 >= args.len) return missingDataValue();
+            i += 1;
+            data_arg = args[i];
+            force_file = true;
+        } else if (std.mem.startsWith(u8, a, "--data-file=")) {
+            data_arg = a["--data-file=".len..];
+            force_file = true;
+        } else if (eq(a, "--set")) {
+            if (i + 1 >= args.len) break;
+            i += 1;
+            try mergePair(ctx.arena, &obj, args[i]);
+            continue;
+        } else if (std.mem.startsWith(u8, a, "--set=")) {
+            try mergePair(ctx.arena, &obj, a["--set=".len..]);
+            continue;
+        } else if (std.mem.indexOfScalar(u8, a, '=') != null and !std.mem.startsWith(u8, a, "--")) {
+            try mergePair(ctx.arena, &obj, a);
+            continue;
+        } else {
+            continue;
+        }
+
+        const text = readDataText(ctx, data_arg.?, force_file) catch {
+            return .{ .bad = .{
+                .message = "could not read --data source",
+                .next_action = "pass inline JSON ('{\"k\":\"v\"}'), an existing file (--data @path.json or --data-file path.json), or '-' for stdin (--data @-)",
+            } };
+        };
+        mergeJsonObject(ctx.arena, &obj, text) catch |err| switch (err) {
+            error.InvalidJson => return .{ .bad = .{
+                .message = "--data is not valid JSON",
+                .next_action = "pass a JSON object of fields, e.g. --data '{\"description\":\"edge router\",\"status\":\"active\"}'",
+            } },
+            error.NotAnObject => return .{ .bad = .{
+                .message = "--data must be a JSON object of field:value pairs",
+                .next_action = "wrap the fields in an object, e.g. --data '{\"name\":\"POP3\",\"slug\":\"pop3\"}' (arrays/strings/numbers are not accepted at the top level)",
+            } },
+            else => return err,
+        };
+    }
+    return .{ .object = .{ .object = obj } };
+}
+
+fn missingDataValue() CollectedChanges {
+    return .{ .bad = .{
+        .message = "missing value after --data / --data-file",
+        .next_action = "provide a JSON object, e.g. --data '{\"description\":\"edge router\"}' or --data-file change.json",
+    } };
+}
+
+/// Merge one `key=value` pair into `obj`, JSON-parsing the value (so `vid=100`
+/// becomes an integer). An existing key is overwritten in place, keeping its
+/// position so the change order — and thus the plan_hash — stays deterministic.
+fn mergePair(arena: std.mem.Allocator, obj: *std.json.ObjectMap, kv: []const u8) !void {
+    const eqi = std.mem.indexOfScalar(u8, kv, '=') orelse return;
+    try obj.put(arena, kv[0..eqi], plan.scalarValue(arena, kv[eqi + 1 ..]));
+}
+
+/// Merge the top-level fields of a JSON object document into `obj`. Rejects
+/// non-object documents and unparseable text with distinct errors so the caller
+/// can explain exactly what was wrong.
+fn mergeJsonObject(arena: std.mem.Allocator, obj: *std.json.ObjectMap, text: []const u8) !void {
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch
+        return error.InvalidJson;
+    const src = switch (parsed) {
+        .object => |o| o,
+        else => return error.NotAnObject,
+    };
+    var it = src.iterator();
+    while (it.next()) |e| try obj.put(arena, e.key_ptr.*, e.value_ptr.*);
+}
+
+/// Resolve a `--data` / `--data-file` argument to JSON text: an inline string,
+/// the contents of a file (`@path` or `--data-file path`), or stdin (`-`). Both
+/// file and stdin are capped at 4 MB.
+fn readDataText(ctx: *Context, arg: []const u8, force_file: bool) ![]const u8 {
+    const is_file = force_file or std.mem.startsWith(u8, arg, "@");
+    if (!is_file) return arg;
+    const path = if (force_file) arg else arg[1..];
+    if (eq(path, "-")) {
+        var buf: [4096]u8 = undefined;
+        var fr: std.Io.File.Reader = .init(.stdin(), ctx.io, &buf);
+        return fr.interface.allocRemaining(ctx.arena, .limited(4 * 1024 * 1024));
+    }
+    return std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.arena, .limited(4 * 1024 * 1024));
+}
+
 fn findFlag(args: []const [:0]const u8, name: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -4210,4 +4339,32 @@ test "buildConfigValue types values per key kind" {
 
     // unknown key has no spec
     try std.testing.expect(configKeySpec("definitely_not_a_key") == null);
+}
+
+test "mergeJsonObject + mergePair merge --data and --set (later wins, order kept)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var obj: std.json.ObjectMap = .empty;
+
+    // Base supplied as a --data JSON object: scalar types are preserved.
+    try mergeJsonObject(a, &obj, "{\"description\":\"edge router\",\"vid\":100}");
+    try std.testing.expectEqualStrings("edge router", obj.get("description").?.string);
+    try std.testing.expectEqual(@as(i64, 100), obj.get("vid").?.integer);
+
+    // A --set pair overrides an existing key in place and appends a new one.
+    try mergePair(a, &obj, "description=core router");
+    try mergePair(a, &obj, "status=active");
+    try std.testing.expectEqualStrings("core router", obj.get("description").?.string);
+    try std.testing.expectEqualStrings("active", obj.get("status").?.string);
+    try std.testing.expectEqual(@as(usize, 3), obj.count());
+    // Override keeps original position (description first, vid second, status last).
+    try std.testing.expectEqualStrings("description", obj.keys()[0]);
+    try std.testing.expectEqualStrings("status", obj.keys()[2]);
+
+    // Top-level non-object and unparseable documents are rejected distinctly.
+    try std.testing.expectError(error.NotAnObject, mergeJsonObject(a, &obj, "[1,2,3]"));
+    try std.testing.expectError(error.NotAnObject, mergeJsonObject(a, &obj, "\"just a string\""));
+    try std.testing.expectError(error.InvalidJson, mergeJsonObject(a, &obj, "{not valid"));
 }

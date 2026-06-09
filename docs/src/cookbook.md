@@ -98,6 +98,10 @@ nbxg apply   --plan plan_c3d4
 nbxg create site --set name=POP3 --set slug=pop3 --set status=active
 #  -> action:"create", risk_level:"high", status:"pending_approval"
 
+# 字段多时，也可以用一整段 JSON（内联 / @文件 / @- 读 stdin），与 --set 完全等价
+nbxg create site --data '{"name":"POP3","slug":"pop3","status":"active"}'
+nbxg create site --data @site.json --set status=active   # 模板打底，--set 覆盖个别字段
+
 nbxg approve --plan plan_e5f6
 nbxg apply   --plan plan_e5f6
 #  -> POST 创建；data.resource_id = NetBox 分配的新 id
@@ -108,6 +112,7 @@ nbxg restore --backup bkp_...
 
 **看点**：创建**永远是高风险、永远要批、每次单独批**。agent 自己没有 `delete` 权限——
 回滚一次创建时，由 nbxg 内部用一次 `DELETE` 完成，agent 接触不到这把「删除」的刀。
+`--set` 与 `--data` 只是字段的两种写法，走的是同一条受治理的管道。
 
 <a id="case-5"></a>
 

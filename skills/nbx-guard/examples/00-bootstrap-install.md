@@ -22,7 +22,7 @@ nbxg version 2>/dev/null || ~/.agents/skills/nbx-guard/nbxg version
   "command": "version",
   "data": {
     "name": "nbxg",
-    "version": "0.9.0",
+    "version": "0.10.0",
     "token_configured": false,
     "token_source": "none",
     "auto_approve": false,
@@ -84,7 +84,7 @@ OS=$(uname -s | tr '[:upper:]' '[:lower:]'); case "$OS" in darwin) OS=macos;; es
 ARCH=$(uname -m); case "$ARCH" in arm64) ARCH=aarch64;; amd64) ARCH=x86_64;; esac
 
 # 2) 选版本（latest 见 Release 页面，或写死）
-TAG=v0.9.0
+TAG=v0.10.0
 base="https://github.com/terateams/nbx-guard/releases/download/$TAG"
 asset="nbxg-$TAG-$ARCH-$OS.tar.gz"     # Windows 用 nbxg-$TAG-$ARCH-windows.zip
 

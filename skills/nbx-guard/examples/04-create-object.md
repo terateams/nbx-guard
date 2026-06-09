@@ -10,6 +10,10 @@
 nbxg create ip-address --set address=192.0.2.50/32 status=active description="loopback for spine-2"
 #  -> data.plan.plan_id、action:"create"、requires_approval:true、status:"pending_approval"
 
+# 1') 字段多时，也可以用一整段 JSON 传（内联 / @文件 / @- 读 stdin，均与 --set 等价）
+nbxg create ip-address --data '{"address":"192.0.2.50/32","status":"active","description":"loopback for spine-2"}'
+echo '{"address":"192.0.2.50/32","status":"active"}' | nbxg create ip-address --data @-
+
 # 2) 人工批准
 nbxg approve --plan plan_c4d5... --note "new loopback approved"
 
