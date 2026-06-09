@@ -14,13 +14,9 @@ nbx-guard 位于 LLM/agent 与 NetBox 之间。agent 永远无法直接调用 Ne
 基于风险的审批、应用前备份、审计日志与回滚。即使 agent 声称自己拥有全部权限，
 审批规则也在这里被强制执行。
 
-```mermaid
-flowchart LR
-    Agent["Agent / LLM"] --> CLI["nbxg CLI (Zig)"]
-    CLI --> API["NetBox REST API<br/>· NetBox Branching"]
-    CLI --> State["本地状态<br/>plans / backups / approvals / audit"]
-    Approver["人工审批者"] -->|审批| State
-```
+<p align="center">
+  <img src="workflow.png" alt="nbx-guard 工作流" width="720">
+</p>
 
 ## 核心保证
 
