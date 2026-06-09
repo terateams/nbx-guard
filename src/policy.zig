@@ -35,6 +35,21 @@ pub fn actionAllowed(action: []const u8) bool {
     return std.mem.eql(u8, action, "update");
 }
 
+/// True when the operator has turned on auto-approval via NBX_GUARD_AUTO_APPROVE
+/// (config.json `auto_approve`). When on, the change-approval gate (high-risk
+/// update + create) is satisfied automatically while every other control — plan
+/// hashing, drift detection, pre-change backup, and the full audit trail — stays
+/// in force. Operator-only and default-off (fail safe): an unset/false value
+/// keeps the manual approve step. Recognized truthy values match `parseBool`
+/// (`1`, `true`, `yes`, `on`, case-insensitive).
+pub fn autoApproveEnabled(env: *const EnvMap) bool {
+    const s = env.get("NBX_GUARD_AUTO_APPROVE") orelse return false;
+    return std.mem.eql(u8, s, "1") or
+        std.ascii.eqlIgnoreCase(s, "true") or
+        std.ascii.eqlIgnoreCase(s, "yes") or
+        std.ascii.eqlIgnoreCase(s, "on");
+}
+
 /// True when the operator has opted `resource_type` into `create` via
 /// `NBX_GUARD_CREATABLE_RESOURCES` (config.json `creatable_resources`). Default
 /// deny: an empty/unset list permits no creates. A `*` entry permits any
@@ -286,6 +301,21 @@ test "delete action refused" {
     try testing.expect(!actionAllowed("delete"));
     try testing.expect(!actionAllowed("bulk_delete"));
     try testing.expect(actionAllowed("update"));
+}
+
+test "autoApproveEnabled is default-off and honors truthy values" {
+    const a = testing.allocator;
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try testing.expect(!autoApproveEnabled(&env)); // unset
+    try env.put("NBX_GUARD_AUTO_APPROVE", "0");
+    try testing.expect(!autoApproveEnabled(&env));
+    try env.put("NBX_GUARD_AUTO_APPROVE", "off");
+    try testing.expect(!autoApproveEnabled(&env));
+    for ([_][]const u8{ "1", "true", "YES", "On" }) |v| {
+        try env.put("NBX_GUARD_AUTO_APPROVE", v);
+        try testing.expect(autoApproveEnabled(&env));
+    }
 }
 
 test "create is default-deny and opt-in per type (with wildcard)" {

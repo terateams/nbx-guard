@@ -76,39 +76,101 @@ bash scripts/installer.sh
 
 ## 配置
 
-通过环境变量设置（见 `.env.example`）：
+两种等价来源：**环境变量**（见 `.env.example`），或一个 **JSON 配置文件
+`~/.nbx-guard/config.json`**（安装器已自动生成）。两者可混用，**环境变量始终优先**；
+唯一不能进文件的是明文 token。下表为环境变量名，括注其 config.json 键：
 
-| 变量 | 默认值 | 用途 |
+| 变量（config.json 键） | 默认值 | 用途 |
 | --- | --- | --- |
-| `NETBOX_URL` | `http://localhost:8000` | NetBox 基础 URL |
-| `NETBOX_TOKEN` | _（未设置）_ | API token；`get`/`inspect`/`plan`/`apply`/`restore` 必需 |
-| `NBX_GUARD_STATE_DIR` | `.nbx-guard` | 本地状态目录 |
-| `NBX_GUARD_HTTP_TIMEOUT_MS` | `15000` | NetBox 请求连接超时（毫秒）；`0` 关闭 |
-| `NBX_GUARD_BRANCHING` | `0` | 将读写路由进某个 NetBox Branching 分支 |
-| `NBX_GUARD_BRANCH` | _（未设置）_ | 生效分支的 schema id（作为 `X-NetBox-Branch` 发送） |
-| `NBX_GUARD_EXTRA_RESOURCES` | _（未设置）_ | **算子**扩展受治理类型（`类型=端点` 列表，如 `site=dcim/sites`） |
-| `NBX_GUARD_ALLOWED_FIELDS` | _（未设置）_ | **算子**追加的低风险字段（逗号/空格分隔） |
-| `NBX_GUARD_HIGH_RISK_FIELDS` | _（未设置）_ | **算子**追加的高风险字段（需审批） |
-| `NBX_GUARD_READ_SENSITIVE_FIELDS` | _（未设置）_ | **算子**追加的读敏感字段（整对象读取需 `approve-read`） |
-| `NBX_GUARD_CREATABLE_RESOURCES` | _（未设置）_ | **算子**开启 `create` 的类型（`*`=任意类型；创建仍逐次审批） |
-| `NBX_GUARD_CONFIG` | _（未设置）_ | **算子**配置文件路径覆盖；默认 `~/.nbx-guard/config.json` |
+| `NETBOX_URL`（`netbox_url`） | `http://localhost:8000` | NetBox 基础 URL |
+| `NETBOX_TOKEN`（_禁止入文件_） | _（未设置）_ | API token；`get`/`inspect`/`plan`/`apply`/`restore` 必需 |
+| `NETBOX_TOKEN_FILE`（`token_file`） | _（未设置）_ | 从文件读取 token（Docker/K8s secret、systemd credentials、Vault agent 文件）。 |
+| `NETBOX_TOKEN_CMD`（`token_cmd`） | _（未设置）_ | 执行命令取 token（对接系统钥匙链，如 macOS `security`、Linux `secret-tool`/`pass`）。 |
+| `NBX_GUARD_STATE_DIR`（`state_dir`） | `.nbx-guard` | 本地状态目录 |
+| `NBX_GUARD_HTTP_TIMEOUT_MS`（`http_timeout_ms`） | `15000` | NetBox 请求连接超时（毫秒）；`0` 关闭 |
+| `NBX_GUARD_BRANCHING`（`branching`） | `0` | 将读写路由进某个 NetBox Branching 分支 |
+| `NBX_GUARD_BRANCH`（`branch`） | _（未设置）_ | 生效分支的 schema id（作为 `X-NetBox-Branch` 发送） |
+| `NBX_GUARD_AUTO_APPROVE`（`auto_approve`） | `0` | **算子**自动审批开关：高风险 update / create 在 plan 时自动审批，仍写完整审计与备份（见下） |
+| `NBX_GUARD_EXTRA_RESOURCES`（`extra_resources`） | _（未设置）_ | **算子**扩展受治理类型（`类型=端点` 列表，如 `site=dcim/sites`） |
+| `NBX_GUARD_ALLOWED_FIELDS`（`allowed_fields`） | _（未设置）_ | **算子**追加的低风险字段（逗号/空格分隔） |
+| `NBX_GUARD_HIGH_RISK_FIELDS`（`high_risk_fields`） | _（未设置）_ | **算子**追加的高风险字段（需审批） |
+| `NBX_GUARD_READ_SENSITIVE_FIELDS`（`read_sensitive_fields`） | _（未设置）_ | **算子**追加的读敏感字段（整对象读取需 `approve-read`） |
+| `NBX_GUARD_CREATABLE_RESOURCES`（`creatable_resources`） | _（未设置）_ | **算子**开启 `create` 的类型（`*`=任意类型；创建仍逐次审批） |
+| `NBX_GUARD_CONFIG`（_即本文件路径_） | _（未设置）_ | **算子**配置文件路径覆盖；默认 `~/.nbx-guard/config.json` |
 
-> **算子配置文件（更友好）**：不想导出上面三个治理扩展变量，可改用一个 JSON 文件
-> `~/.nbx-guard/config.json`（路径可用 `NBX_GUARD_CONFIG` 覆盖），行为与环境变量一致、且与
-> 环境变量取并集；**密钥仍只走环境变量，不要写进此文件**。
+> **一个文件搞定（推荐）**：嫌环境变量多，就把上表的设置写进 `~/.nbx-guard/config.json`
+> ——安装器已为你生成，改两行即可。明文 token **绝不入文件**（出现 `netbox_token` 键会被
+> 拒绝）：用 `token_cmd`（钥匙链）或 `token_file`（文件）这两个指针，或保留 `NETBOX_TOKEN`
+> 环境变量。
 >
 > ```json
-> { "extra_resources": { "site": "dcim/sites" }, "allowed_fields": ["serial"], "high_risk_fields": ["tenant"] }
+> {
+>   "netbox_url": "https://netbox.example.com",
+>   "token_cmd":  "security find-generic-password -s netbox -w",
+>   "auto_approve": false,
+>   "allowed_fields": ["serial"], "high_risk_fields": ["tenant"]
+> }
 > ```
 
 `NETBOX_TOKEN` 同时支持 NetBox v1 与 v2 token：以 `nbt_` 开头的 v2 token（NetBox 4.5+
 默认）自动以 `Bearer` 方案鉴权，其余按 v1 `Token` 方案发送——把 NetBox 给你的 token
 原样填入即可。已在 **NetBox Community 4.5.1（netbox-docker 3.4.2）** 上端到端验收。
 
+### token 的安全来源（钥匙链友好）
+
+不想把明文 token 放进环境/`.env`？除 `NETBOX_TOKEN` 外还有两种来源，**优先级
+`NETBOX_TOKEN` > `NETBOX_TOKEN_CMD` > `NETBOX_TOKEN_FILE`**，读取后裁掉尾部空白：
+
+```sh
+# 1) 文件（Docker/K8s secret、systemd credentials、Vault agent 渲染文件）
+export NETBOX_TOKEN_FILE=/run/secrets/netbox_token
+
+# 2) 命令 —— 直接对接系统钥匙链
+export NETBOX_TOKEN_CMD='security find-generic-password -s netbox -w'   # macOS Keychain
+export NETBOX_TOKEN_CMD='secret-tool lookup service netbox'             # Linux libsecret
+export NETBOX_TOKEN_CMD='pass show netbox/token'                        # pass
+```
+
+这两个指针也可写进 config.json（`token_file` / `token_cmd`）——但明文 token 本身绝不入文件。
+token 绝不写入状态目录，也绝不在输出里打印；`nbxg version` 只报告
+`token_configured` 与来源 `token_source`（`env` / `cmd` / `file` / `none`），便于排错。
+文件读不出、命令非零退出或产出为空，都会以 `config_error`（退出码 3）明确失败。
+
+### 自动审批（autopilot，仅算子）
+
+默认每个高风险变更都要人工 `approve`。当你**在自己的分支/沙箱里处理数据**、只想要审计
+记录而非逐条审批时，算子可开启自动审批：
+
+```sh
+export NBX_GUARD_AUTO_APPROVE=1     # 或 config.json: { "auto_approve": true }
+# 强烈建议与分支搭配，让自动审批的变更落进隔离分支、再由人工 merge：
+export NBX_GUARD_BRANCHING=1
+export NBX_GUARD_BRANCH=<schema_id>
+```
+
+开启后，高风险 `update` 与 `create` 的 plan 在创建时即**自动生成一条 `approver: "auto"`
+的审批记录**并置为 `approved`，可直接 `apply`。其余所有控制保持不变：plan_hash 完整性、
+漂移检测、应用前备份、以及完整审计（事件 `auto_approved`）。这是**算子专用**开关
+（与其它 `NBX_GUARD_*` 治理变量同理，agent 不应自行设置），默认关闭（fail-safe）。
+
 当 `NBX_GUARD_BRANCHING` 启用**且** `NBX_GUARD_BRANCH` 含有某个分支的 schema id 时，
 每个 NetBox 请求都会带上 `X-NetBox-Branch: <schema_id>` 头，于是受控变更落到该分支而
 非 `main`。分支的创建以及之后的 `sync`/`merge`/`revert`，通过 NetBox 自身的 Branching
 API 完成——这些审批者级别的生命周期操作刻意不由 agent 网关承担。
+
+### 配置可被 Agent 提案修改（人工审批 + 审计）
+
+一个只会拒绝的工具会把普通运维挡在门外。`nbxg` 不是放弃门禁，而是让「改门禁」本身透明且受治理：
+
+- **`nbxg config show`**：用大白话说明当前配置允许 Agent 做什么（token 来源、受治理类型、免审批/需审批
+  字段、是否自动审批），并给出「想做更多该跑哪条 `config set`」。
+- **`nbxg config set <key=value> ...`**：Agent **提案**一项变更（如 `auto_approve=true`、
+  `allowed_fields=serial`、`creatable_resources=site`、`extra_resources=site:dcim/sites`）。它不立即
+  改动任何东西，而是生成一个 `pending_approval` 的 plan，列出改什么、从什么到什么、风险与责任。
+
+链路与数据变更一致：`config set`（Agent 提案）→ `approve`（人类授权）→ `apply`（Agent 写入，自动备份
+旧配置）→ 审计 `config_applied`。**关键安全约束**：配置变更**永不自动审批**——即使 `auto_approve` 已开启，
+`config set` 仍需人工 `approve`，Agent 无法借此自我提权；明文 token 永不入文件。
 
 ## 策略（MVP）
 
@@ -141,6 +203,8 @@ API 完成——这些审批者级别的生命周期操作刻意不由 agent 网
 ```
 nbxg version                          打印版本与当前生效配置
 nbxg help                             显示帮助
+nbxg config show                      用大白话说明当前配置允许 Agent 做什么、以及如何放宽（无需 token）
+nbxg config set <key=value> ...       提案一项治理/连接变更（人工审批 + 全程审计；绝不自动审批）
 nbxg doctor [--skill <dir>]           自检：安装的二进制与 SKILL.md/源码是否一致（离线）
 nbxg get <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]
                                       读取资源；basic（默认）脱敏读敏感字段，all 需读审批

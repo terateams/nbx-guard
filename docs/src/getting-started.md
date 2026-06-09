@@ -57,7 +57,27 @@ export NETBOX_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 nbxg get device 1
 ```
 
-全部变量见[配置](./configuration.md)。
+不想把 token 放进环境变量？可改用文件或钥匙链（详见[配置](./configuration.md#token-的来源钥匙链友好)）：
+
+```sh
+# 从文件读取（Docker/K8s secret、systemd credentials）
+export NETBOX_TOKEN_FILE=/run/secrets/netbox_token
+# 或从系统钥匙链取（macOS security / Linux secret-tool / pass）
+export NETBOX_TOKEN_CMD='security find-generic-password -s netbox -w'
+```
+
+全部变量见[配置](./configuration.md)。`nbxg version` 会报告 `token_source`（`env`/`cmd`/`file`/`none`）。
+
+> **嫌环境变量多？一个文件搞定。** 上面这些设置都可写进 `~/.nbx-guard/config.json`
+> （安装器已自动生成），例如：
+>
+> ```json
+> { "netbox_url": "https://netbox.example.com",
+>   "token_cmd": "security find-generic-password -s netbox -w" }
+> ```
+>
+> 环境变量始终优先；明文 token 绝不入文件——用 `token_cmd`/`token_file` 指针。
+> 详见[配置 · 算子配置文件](./configuration.md#算子配置文件一个文件搞定)。
 
 ## 第一次安全变更
 

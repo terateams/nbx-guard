@@ -6,6 +6,8 @@
 ```text
 nbxg version                          打印版本与当前生效配置
 nbxg help                             显示帮助
+nbxg config show                      用大白话说明当前配置允许 Agent 做什么、以及如何放宽（无需 token）
+nbxg config set <key=value> ...       提案一项治理/连接变更（人工审批 + 全程审计；绝不自动审批）
 nbxg doctor [--skill <dir>]           自检：安装的二进制与 SKILL.md/源码是否一致（离线）
 nbxg get <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]
                                       读取资源；basic（默认）脱敏读敏感字段，all 需读审批
@@ -39,6 +41,41 @@ nbxg list <plans|approvals|backups>   列出本地状态
 
 打印用法、命令列表、支持的资源类型、允许/高风险**写**字段、**读敏感**字段列表，以及可识别的环境变量。
 也可用 `--help` / `-h`。不带参数运行时打印帮助。
+
+## `config show`
+
+用大白话回答「当前这套配置允许 Agent 做什么」，不访问网络、无需 token。输出包含：token 来源
+（`env`/`cmd`/`file`/`none`）、连接（`netbox_url`/`branching`/`branch`/`state_dir`/`http_timeout_ms`）、
+配置文件路径与是否存在、是否自动审批、受治理资源类型、免审批可写字段、需审批字段、读敏感字段、可创建类型，
+以及一个 `capabilities`（现在能做什么）与 `to_change`（想做更多该跑哪条 `config set`）的清单。
+
+**遇到不确定能不能做某事时，先 `config show`**：能做就直接做，不能做再用 `config set` 提案。
+
+## `config set <key=value> ...`
+
+Agent **提案**一项治理/连接变更，**不立即改动任何东西**，而是生成一个 `pending_approval` 的 plan，
+列出改什么、从什么值到什么值、风险等级与影响。随后由**人类** `approve`、再由 Agent `apply` 写入配置
+（自动备份旧配置到 `<state_dir>/config-backups/`、可回滚），全程审计（`config_applied`）。
+
+可设置的键（值语法）：
+
+```text
+auto_approve=true|false            # 自动审批开关（高风险）
+creatable_resources=site,vlan      # 开启 create 的类型（逗号分隔，* 表示任意）
+allowed_fields=serial,asset_tag    # 追加免审批可写字段
+high_risk_fields=tenant            # 追加需审批可写字段
+read_sensitive_fields=serial       # 追加读敏感字段（只收紧）
+extra_resources=site:dcim/sites,tenant:tenancy/tenants   # 治理更多类型（type:app/endpoint）
+netbox_url=https://netbox.example.com
+token_file=/run/secrets/netbox_token
+token_cmd=security find-generic-password -s netbox -w
+state_dir=/var/lib/nbx-guard
+branching=true   branch=<schema_id>   http_timeout_ms=15000
+```
+
+**关键安全约束**：配置变更**永远不会被自动审批**——即使 `auto_approve` 已开启，`config set` 生成的 plan
+仍是 `pending_approval`，需人工 `approve`，Agent 无法借此自我提权。明文 token（`netbox_token`/`token`）
+被拒绝；未知键、非法值同样被拒。完整链路：`config set`（提案）→ `approve`（人类）→ `apply`（写入）。
 
 ## `doctor [--skill <dir>]`
 

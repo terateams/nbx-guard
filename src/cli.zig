@@ -31,6 +31,7 @@ const create_sentinel_id = "(new)";
 
 pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
     if (try applyOperatorConfig(ctx)) |code| return code;
+    if (try resolveToken(ctx)) |code| return code;
     if (args.len < 2) {
         try printHelp(ctx);
         return exit_ok;
@@ -44,6 +45,8 @@ pub fn run(ctx: *Context, args: []const [:0]const u8) !u8 {
     } else if (eq(cmd, "help") or eq(cmd, "--help") or eq(cmd, "-h")) {
         try printHelp(ctx);
         return exit_ok;
+    } else if (eq(cmd, "config")) {
+        return cmdConfig(ctx, rest);
     } else if (eq(cmd, "doctor")) {
         return cmdDoctor(ctx, args[0], rest);
     } else if (eq(cmd, "get")) {
@@ -129,17 +132,156 @@ fn applyOperatorConfig(ctx: *Context) !?u8 {
         },
     };
 
-    const ext = config.parseExtJson(ctx.arena, bytes) catch {
+    const ext = config.parseExtJson(ctx.arena, bytes) catch |err| {
+        const Detail = struct { message: []const u8, next_action: []const u8 };
+        const d: Detail = switch (err) {
+            error.SecretInConfig => .{
+                .message = "the operator config file must not contain the raw NetBox token",
+                .next_action = "remove the \"netbox_token\"/\"token\" key; point at a keychain with \"token_cmd\", a file with \"token_file\", or set NETBOX_TOKEN in the environment",
+            },
+            error.InvalidConfig => .{
+                .message = "invalid operator config JSON (~/.nbx-guard/config.json)",
+                .next_action = "fix the JSON (object root). Connection keys: netbox_url, token_cmd, token_file, state_dir, branching, branch, http_timeout_ms. Governance keys: extra_resources, allowed_fields, high_risk_fields, read_sensitive_fields, creatable_resources, auto_approve. Never put the raw token here.",
+            },
+        };
         try ctx.fail("config", .{
             .kind = .config_error,
-            .message = "invalid operator config JSON (~/.nbx-guard/config.json)",
-            .next_action = "fix the JSON: object root with optional extra_resources (object of \"type\":\"path\"), allowed_fields ([string]) and high_risk_fields ([string]); keep NETBOX_URL/NETBOX_TOKEN in the environment, not here",
+            .message = d.message,
+            .next_action = d.next_action,
         });
         return exit_upstream;
     };
+    ctx.config_path = path;
     if (ext.isEmpty()) return null;
+    applyConnectionConfig(ctx, ext);
     ctx.env = try config.mergeEnv(ctx.arena, ctx.env, ext);
     return null;
+}
+
+/// Overlay connection/runtime settings from the operator config file onto
+/// `ctx.config`, but only where the matching environment variable is unset — the
+/// environment always wins. This is what lets an operator keep the whole setup in
+/// one ~/.nbx-guard/config.json (URL, token source, state dir, branching, timeout)
+/// instead of exporting a pile of env vars. Secrets never live here: the raw token
+/// is refused at parse time, so `token_file`/`token_cmd` are only pointers.
+fn applyConnectionConfig(ctx: *Context, ext: config.ParsedExt) void {
+    if (ext.netbox_url) |v| {
+        if (envUnset(ctx, "NETBOX_URL")) ctx.config.netbox_url = v;
+    }
+    if (ext.netbox_token_file) |v| {
+        if (envUnset(ctx, "NETBOX_TOKEN_FILE")) ctx.config.netbox_token_file = v;
+    }
+    if (ext.netbox_token_cmd) |v| {
+        if (envUnset(ctx, "NETBOX_TOKEN_CMD")) ctx.config.netbox_token_cmd = v;
+    }
+    if (ext.state_dir) |v| {
+        if (envUnset(ctx, "NBX_GUARD_STATE_DIR")) ctx.config.state_dir = v;
+    }
+    if (ext.branch) |v| {
+        if (envUnset(ctx, "NBX_GUARD_BRANCH")) ctx.config.branch = v;
+    }
+    if (ext.branching) |_| {
+        if (envUnset(ctx, "NBX_GUARD_BRANCHING")) ctx.config.branching = true;
+    }
+    if (ext.http_timeout_ms) |v| {
+        if (envUnset(ctx, "NBX_GUARD_HTTP_TIMEOUT_MS")) {
+            ctx.config.http_timeout_ms = std.fmt.parseInt(u64, v, 10) catch ctx.config.http_timeout_ms;
+        }
+    }
+}
+
+/// True when an environment variable is absent or empty, i.e. the operator has not
+/// set it and the config-file value should take effect.
+fn envUnset(ctx: *Context, key: []const u8) bool {
+    const v = ctx.env.get(key) orelse return true;
+    return v.len == 0;
+}
+
+/// Resolve the effective NetBox token and record where it came from. Secrets stay
+/// out of the environment when an operator prefers it: the token may be supplied
+/// directly (`NETBOX_TOKEN`), read from a file (`NETBOX_TOKEN_FILE` — Docker/k8s
+/// secrets, systemd credentials, a Vault-agent file), or produced by a command
+/// (`NETBOX_TOKEN_CMD` — the direct hook into an OS keychain, e.g. macOS
+/// `security find-generic-password -w`, Linux `secret-tool lookup` / `pass`).
+/// Precedence: env var > command > file. On success `ctx.config.netbox_token`
+/// holds the token and `ctx.token_source` names the source; a misconfigured
+/// file/command aborts with a `config_error` envelope. No source configured is
+/// not an error here — read-free commands still run, and commands needing a token
+/// fail later with a precise needs-token message.
+fn resolveToken(ctx: *Context) !?u8 {
+    if (ctx.config.netbox_token != null) {
+        ctx.token_source = "env";
+        return null;
+    }
+    if (ctx.config.netbox_token_cmd) |cmd| {
+        const tok = runTokenCmd(ctx, cmd) catch {
+            try ctx.fail("config", .{
+                .kind = .config_error,
+                .message = "NETBOX_TOKEN_CMD failed to produce a token",
+                .next_action = "the command in NETBOX_TOKEN_CMD must print the token to stdout and exit 0 (e.g. `security find-generic-password -s netbox -w`)",
+            });
+            return exit_upstream;
+        };
+        if (tok.len == 0) {
+            try ctx.fail("config", .{
+                .kind = .config_error,
+                .message = "NETBOX_TOKEN_CMD produced an empty token",
+                .next_action = "ensure the command prints the NetBox token to stdout",
+            });
+            return exit_upstream;
+        }
+        ctx.config.netbox_token = tok;
+        ctx.token_source = "cmd";
+        return null;
+    }
+    if (ctx.config.netbox_token_file) |file_path| {
+        const raw = std.Io.Dir.cwd().readFileAlloc(ctx.io, file_path, ctx.gpa, .limited(64 * 1024)) catch {
+            try ctx.fail("config", .{
+                .kind = .config_error,
+                .message = "NETBOX_TOKEN_FILE could not be read",
+                .next_action = "check the path and permissions of the file named by NETBOX_TOKEN_FILE",
+            });
+            return exit_upstream;
+        };
+        defer ctx.gpa.free(raw);
+        const tok = std.mem.trim(u8, raw, " \t\r\n");
+        if (tok.len == 0) {
+            try ctx.fail("config", .{
+                .kind = .config_error,
+                .message = "NETBOX_TOKEN_FILE is empty",
+                .next_action = "put the NetBox token (and nothing else) in the file named by NETBOX_TOKEN_FILE",
+            });
+            return exit_upstream;
+        }
+        ctx.config.netbox_token = try ctx.arena.dupe(u8, tok);
+        ctx.token_source = "file";
+        return null;
+    }
+    ctx.token_source = "none";
+    return null;
+}
+
+/// Run `cmd` through the platform shell and return its trimmed stdout (arena-
+/// owned). Used only to fetch the NetBox token from a keychain/secret helper.
+fn runTokenCmd(ctx: *Context, cmd: []const u8) ![]const u8 {
+    const builtin = @import("builtin");
+    const argv = if (builtin.os.tag == .windows)
+        [_][]const u8{ "cmd.exe", "/c", cmd }
+    else
+        [_][]const u8{ "/bin/sh", "-c", cmd };
+    const res = try std.process.run(ctx.gpa, ctx.io, .{
+        .argv = &argv,
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer ctx.gpa.free(res.stdout);
+    defer ctx.gpa.free(res.stderr);
+    switch (res.term) {
+        .exited => |code| if (code != 0) return error.TokenCmdFailed,
+        else => return error.TokenCmdFailed,
+    }
+    const tok = std.mem.trim(u8, res.stdout, " \t\r\n");
+    return ctx.arena.dupe(u8, tok);
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +298,9 @@ fn cmdVersion(ctx: *Context) !void {
         branch: ?[]const u8 = null,
         state_dir: []const u8,
         token_configured: bool,
+        token_source: []const u8,
+        auto_approve: bool,
+        config_file: ?[]const u8 = null,
         principle: []const u8 = "Agent proposes intent; the CLI decides what is allowed.",
     };
     try ctx.ok("version", Info{
@@ -164,6 +309,9 @@ fn cmdVersion(ctx: *Context) !void {
         .branch = netbox.activeBranch(ctx.config),
         .state_dir = ctx.config.state_dir,
         .token_configured = ctx.config.netbox_token != null,
+        .token_source = ctx.token_source,
+        .auto_approve = policy.autoApproveEnabled(ctx.env),
+        .config_file = ctx.config_path,
     });
 }
 
@@ -179,20 +327,23 @@ const EnvVar = struct {
 /// The `env` section of `nbxg help`, grouped so the reader sees at a glance that
 /// only two variables are actually required and the rest are optional knobs.
 const EnvHelp = struct {
-    note: []const u8 = "Most setups need only NETBOX_URL + NETBOX_TOKEN. Everything below that is optional.",
+    note: []const u8 = "Most setups need only NETBOX_URL + NETBOX_TOKEN. You can put these (and any knob below) once in ~/.nbx-guard/config.json instead of exporting env vars — each shows its config.json key. The environment always wins over the file.",
     required: []const EnvVar = &.{
-        .{ .name = "NETBOX_URL", .default = "http://localhost:8000", .example = "https://netbox.example.com", .purpose = "Address of your NetBox instance." },
-        .{ .name = "NETBOX_TOKEN", .default = "(unset)", .example = "<your-netbox-api-token>", .purpose = "NetBox API token. Required — without it nothing can read or write. Paste it as-is (v1 and v2 'nbt_…' tokens both work)." },
+        .{ .name = "NETBOX_URL", .default = "http://localhost:8000", .example = "https://netbox.example.com", .purpose = "Address of your NetBox instance. config.json key: netbox_url." },
+        .{ .name = "NETBOX_TOKEN", .default = "(unset)", .example = "<your-netbox-api-token>", .purpose = "NetBox API token. Required — without it nothing can read or write. Paste it as-is (v1 and v2 'nbt_…' tokens both work). To keep it out of the environment use NETBOX_TOKEN_FILE / NETBOX_TOKEN_CMD (config.json: token_file / token_cmd). The raw token must never go in config.json." },
     },
     optional: []const EnvVar = &.{
-        .{ .name = "NBX_GUARD_STATE_DIR", .default = ".nbx-guard", .example = "/var/lib/nbx-guard", .purpose = "Folder for this tool's own data: change plans, approvals, backups, audit log." },
-        .{ .name = "NBX_GUARD_HTTP_TIMEOUT_MS", .default = "15000", .example = "15000", .purpose = "Give up on a NetBox request after this many milliseconds so a command never hangs. 0 = wait forever." },
-        .{ .name = "NBX_GUARD_BRANCHING", .default = "0", .example = "1", .purpose = "Set to 1 to work inside a NetBox Branching branch instead of the live data." },
-        .{ .name = "NBX_GUARD_BRANCH", .default = "(unset)", .example = "abc12345", .purpose = "Which branch to use (its schema id). Needed when NBX_GUARD_BRANCHING=1." },
+        .{ .name = "NETBOX_TOKEN_FILE", .default = "(unset)", .example = "/run/secrets/netbox_token", .purpose = "Read the token from this file instead of NETBOX_TOKEN. For Docker/Kubernetes secrets, systemd credentials, or a Vault-agent rendered file. config.json key: token_file." },
+        .{ .name = "NETBOX_TOKEN_CMD", .default = "(unset)", .example = "security find-generic-password -s netbox -w", .purpose = "Run this command and use its stdout as the token. The hook into an OS keychain: macOS `security`, Linux `secret-tool`/`pass`. Precedence: NETBOX_TOKEN > NETBOX_TOKEN_CMD > NETBOX_TOKEN_FILE. config.json key: token_cmd." },
+        .{ .name = "NBX_GUARD_STATE_DIR", .default = ".nbx-guard", .example = "/var/lib/nbx-guard", .purpose = "Folder for this tool's own data: change plans, approvals, backups, audit log. config.json key: state_dir." },
+        .{ .name = "NBX_GUARD_HTTP_TIMEOUT_MS", .default = "15000", .example = "15000", .purpose = "Give up on a NetBox request after this many milliseconds so a command never hangs. 0 = wait forever. config.json key: http_timeout_ms." },
+        .{ .name = "NBX_GUARD_BRANCHING", .default = "0", .example = "1", .purpose = "Set to 1 to work inside a NetBox Branching branch instead of the live data. config.json key: branching." },
+        .{ .name = "NBX_GUARD_BRANCH", .default = "(unset)", .example = "abc12345", .purpose = "Which branch to use (its schema id). Needed when NBX_GUARD_BRANCHING=1. config.json key: branch." },
     },
-    advanced_note: []const u8 = "Operator-only. These widen what the tool is allowed to touch (it denies every type and field by default). An agent must not set them — set them once, more readably, in ~/.nbx-guard/config.json using the config.json key shown for each.",
+    advanced_note: []const u8 = "Operator-only. These widen what the tool is allowed to touch (it denies every type and field by default) or relax the approval gate. An agent must not set them — set them once, more readably, in ~/.nbx-guard/config.json using the config.json key shown for each.",
     advanced: []const EnvVar = &.{
         .{ .name = "NBX_GUARD_CONFIG", .default = "~/.nbx-guard/config.json", .example = "/etc/nbx-guard/config.json", .purpose = "Read the operator config file from a custom path instead of the default location." },
+        .{ .name = "NBX_GUARD_AUTO_APPROVE", .default = "0", .example = "1", .purpose = "Set to 1 to auto-approve change plans (high-risk update + create) while still recording a full audit trail. For your own branch/sandbox work — pair it with NBX_GUARD_BRANCHING. config.json key: auto_approve." },
         .{ .name = "NBX_GUARD_EXTRA_RESOURCES", .default = "(unset)", .example = "site=dcim/sites,tenant=tenancy/tenants", .purpose = "Allow more NetBox resource types. Format: type=app/endpoint, comma-separated. config.json key: extra_resources." },
         .{ .name = "NBX_GUARD_ALLOWED_FIELDS", .default = "(unset)", .example = "serial,asset_tag", .purpose = "Allow more fields to be written without approval (low risk). config.json key: allowed_fields." },
         .{ .name = "NBX_GUARD_HIGH_RISK_FIELDS", .default = "(unset)", .example = "tenant", .purpose = "Allow more fields to be written, but require an approval first. config.json key: high_risk_fields." },
@@ -214,6 +365,8 @@ fn printHelp(ctx: *Context) !void {
         commands: []const []const u8 = &.{
             "version                          Print version and active configuration",
             "help                             Show this help",
+            "config show                      Explain in plain language what the current config lets the agent do",
+            "config set <key=value> ...       Propose a governance/connection change (human-approved + audited)",
             "doctor [--skill <dir>]           Check installed binary vs SKILL.md/source for drift (offline)",
             "get <type> <id> [--fields basic|all] [--plan-read] [--plan <id>]",
             "                                 Read a NetBox resource (basic redacts sensitive fields; all needs read approval)",
@@ -1291,6 +1444,555 @@ fn openApiProperties(doc: std.json.Value, component: []const u8) ?std.json.Value
 }
 
 // ---------------------------------------------------------------------------
+// config (capability introspection + human-approved governance changes)
+// ---------------------------------------------------------------------------
+//
+// The guard is default-deny: out of the box the agent may only touch a small
+// allow-list of types and fields. Ordinary operators often cannot hand-edit
+// ~/.nbx-guard/config.json, so a tool that *only* refuses is a safe corpse. The
+// answer is not to drop the gate but to make changing it transparent and
+// governed: `config show` says, in plain words, exactly what the current config
+// permits; `config set` lets the agent *propose* a change, which a human must
+// approve (the same plan->approve->apply path as a data change) and which is
+// fully audited. The agent never approves its own config change — even when
+// NBX_GUARD_AUTO_APPROVE is on, a config change is never auto-approved.
+
+const config_action = "config_set";
+const config_resource_type = "operator_config";
+
+const ConfigKeyKind = enum { boolean, integer, string, list, object_map, forbidden };
+
+const ConfigKeySpec = struct {
+    name: []const u8,
+    kind: ConfigKeyKind,
+    /// Risk surfaced to the human: "high" loosens governance, "medium" is a
+    /// connection/runtime change. Every config change requires approval anyway.
+    risk: []const u8,
+    /// Plain-language consequence of setting this key, for the approval prompt.
+    impact: []const u8,
+};
+
+const config_key_specs = [_]ConfigKeySpec{
+    .{ .name = "auto_approve", .kind = .boolean, .risk = "high", .impact = "Turns OFF the manual approval gate: change plans (high-risk updates and creates) get auto-approved. Still audited. Only safe for your own branch/sandbox work — pair it with branching." },
+    .{ .name = "creatable_resources", .kind = .list, .risk = "high", .impact = "Lets `nbxg create` make brand-new objects of these types (default: none). Use * for any type. Every create still needs approval." },
+    .{ .name = "allowed_fields", .kind = .list, .risk = "high", .impact = "Lets the agent change these extra fields WITHOUT approval (treated low-risk). Built-in high-risk fields can never be downgraded." },
+    .{ .name = "high_risk_fields", .kind = .list, .risk = "high", .impact = "Lets the agent change these extra fields, but each change needs an approval first." },
+    .{ .name = "extra_resources", .kind = .object_map, .risk = "high", .impact = "Governs additional NetBox resource types (type:app/endpoint). The agent can then read and plan changes on them under the same policy." },
+    .{ .name = "read_sensitive_fields", .kind = .list, .risk = "medium", .impact = "Marks more fields as sensitive: hidden on read unless a human runs approve-read. This only tightens exposure." },
+    .{ .name = "netbox_url", .kind = .string, .risk = "medium", .impact = "Changes which NetBox instance every command talks to." },
+    .{ .name = "token_file", .kind = .string, .risk = "medium", .impact = "Reads the NetBox token from this file (keychain/secret-manager friendly). The raw token is never stored in config." },
+    .{ .name = "token_cmd", .kind = .string, .risk = "medium", .impact = "Runs this command and uses its stdout as the NetBox token (OS keychain hook). The raw token is never stored in config." },
+    .{ .name = "state_dir", .kind = .string, .risk = "medium", .impact = "Moves where the guard keeps its own plans/approvals/backups/audit log." },
+    .{ .name = "branch", .kind = .string, .risk = "medium", .impact = "Selects the NetBox Branching branch (schema id) to work in." },
+    .{ .name = "branching", .kind = .boolean, .risk = "medium", .impact = "Works inside a NetBox Branching branch instead of live data (a safety net for changes)." },
+    .{ .name = "http_timeout_ms", .kind = .integer, .risk = "medium", .impact = "How long to wait on a NetBox request before giving up (0 = wait forever)." },
+    .{ .name = "netbox_token", .kind = .forbidden, .risk = "high", .impact = "The raw token must never be written to config." },
+    .{ .name = "token", .kind = .forbidden, .risk = "high", .impact = "The raw token must never be written to config." },
+};
+
+fn configKeySpec(name: []const u8) ?ConfigKeySpec {
+    for (config_key_specs) |k| if (eq(k.name, name)) return k;
+    return null;
+}
+
+fn cmdConfig(ctx: *Context, rest: []const [:0]const u8) !u8 {
+    if (rest.len == 0 or eq(rest[0], "show")) return cmdConfigShow(ctx);
+    if (eq(rest[0], "set")) return cmdConfigSet(ctx, rest[1..]);
+    try ctx.fail("config", .{
+        .kind = .invalid_args,
+        .message = "unknown config subcommand",
+        .next_action = "use `nbxg config show` to see current capabilities, or `nbxg config set <key=value> ...` to propose a change",
+    });
+    return exit_client;
+}
+
+/// Resolve the operator config file this run reads/writes: the file actually
+/// loaded (`ctx.config_path`), else an explicit `NBX_GUARD_CONFIG`, else the
+/// default `$HOME/.nbx-guard/config.json`. Returns null only when no path can be
+/// determined (no HOME and no override) so the caller emits a precise error.
+fn operatorConfigTarget(ctx: *Context) !?[]const u8 {
+    if (ctx.config_path) |p| return p;
+    if (ctx.env.get("NBX_GUARD_CONFIG")) |v| {
+        if (v.len != 0) return v;
+    }
+    const home = ctx.env.get("HOME") orelse return null;
+    if (home.len == 0) return null;
+    return try std.fs.path.join(ctx.arena, &.{ home, ".nbx-guard", "config.json" });
+}
+
+fn fileExists(ctx: *Context, path: []const u8) bool {
+    std.Io.Dir.cwd().access(ctx.io, path, .{}) catch return false;
+    return true;
+}
+
+fn cmdConfigShow(ctx: *Context) !u8 {
+    const ef = try policy.effectiveFields(ctx.arena, ctx.env);
+    const creatable = try policy.effectiveCreatableResources(ctx.arena, ctx.env);
+    const read_sensitive = try policy.effectiveReadSensitiveFields(ctx.arena, ctx.env);
+    const auto = policy.autoApproveEnabled(ctx.env);
+
+    var types: std.ArrayList([]const u8) = .empty;
+    try types.appendSlice(ctx.arena, &.{ "device", "interface", "ip-address", "prefix", "vlan", "contact" });
+    for (try envExtraResources(ctx)) |ex| try types.append(ctx.arena, ex.key);
+
+    const target = try operatorConfigTarget(ctx);
+    const cfg_exists = if (target) |t| fileExists(ctx, t) else false;
+
+    var caps: std.ArrayList([]const u8) = .empty;
+    try caps.append(ctx.arena, "Read any governed resource. Sensitive fields are hidden until a human runs `approve-read`.");
+    try caps.append(ctx.arena, try std.fmt.allocPrint(ctx.arena, "Change these fields WITHOUT approval (low-risk): {s}.", .{try joinOrNone(ctx.arena, ef.allowed)}));
+    try caps.append(ctx.arena, try std.fmt.allocPrint(ctx.arena, "Change these fields WITH one approval (high-risk): {s}.", .{try joinOrNone(ctx.arena, ef.high_risk)}));
+    if (creatable.len == 0) {
+        try caps.append(ctx.arena, "Create brand-new objects: disabled (no creatable types configured).");
+    } else {
+        try caps.append(ctx.arena, try std.fmt.allocPrint(ctx.arena, "Create brand-new objects of: {s} (every create still needs approval).", .{try joinOrNone(ctx.arena, creatable)}));
+    }
+    if (auto) {
+        try caps.append(ctx.arena, "Auto-approve is ON: change plans are approved automatically (still backed up and audited). Best paired with branching. Config changes are NEVER auto-approved.");
+    } else {
+        try caps.append(ctx.arena, "Auto-approve is OFF: every high-risk change waits for `nbxg approve`.");
+    }
+
+    var to_change: std.ArrayList([]const u8) = .empty;
+    try to_change.append(ctx.arena, "Auto-approve your own branch/sandbox work: nbxg config set auto_approve=true");
+    try to_change.append(ctx.arena, "Let the agent change a new field without approval: nbxg config set allowed_fields=<field>");
+    try to_change.append(ctx.arena, "Allow a new field but keep approval: nbxg config set high_risk_fields=<field>");
+    try to_change.append(ctx.arena, "Allow creating a new object type: nbxg config set creatable_resources=<type>");
+    try to_change.append(ctx.arena, "Govern a new resource type: nbxg config set extra_resources=<type>:<app/endpoint>");
+
+    const Token = struct { configured: bool, source: []const u8 };
+    const Connection = struct {
+        netbox_url: []const u8,
+        branching: bool,
+        branch: ?[]const u8 = null,
+        state_dir: []const u8,
+        http_timeout_ms: u64,
+    };
+    const ConfigFile = struct { path: ?[]const u8, exists: bool };
+    const Governance = struct {
+        auto_approve: bool,
+        governed_resource_types: []const []const u8,
+        creatable_resources: []const []const u8,
+        writable_without_approval: []const []const u8,
+        writable_with_approval: []const []const u8,
+        read_sensitive_fields: []const []const u8,
+    };
+    const Report = struct {
+        summary: []const u8 = "This is exactly what the agent may do right now. To do more, the agent proposes a change with `nbxg config set`, a human approves it, and it is audited — refusing is never the only option.",
+        token: Token,
+        connection: Connection,
+        config_file: ConfigFile,
+        governance: Governance,
+        capabilities: []const []const u8,
+        to_change: []const []const u8,
+        change_workflow: []const u8 = "nbxg config set <key=value>  ->  (human) nbxg approve --plan <id>  ->  nbxg apply --plan <id>",
+        next_action: []const u8 = "decide what the agent needs; if the current config already allows it, just proceed — otherwise propose it with `nbxg config set` and ask a human to approve",
+    };
+
+    try ctx.ok("config", Report{
+        .token = .{ .configured = ctx.config.netbox_token != null, .source = ctx.token_source },
+        .connection = .{
+            .netbox_url = ctx.config.netbox_url,
+            .branching = ctx.config.branching,
+            .branch = netbox.activeBranch(ctx.config),
+            .state_dir = ctx.config.state_dir,
+            .http_timeout_ms = ctx.config.http_timeout_ms,
+        },
+        .config_file = .{ .path = target, .exists = cfg_exists },
+        .governance = .{
+            .auto_approve = auto,
+            .governed_resource_types = try types.toOwnedSlice(ctx.arena),
+            .creatable_resources = creatable,
+            .writable_without_approval = ef.allowed,
+            .writable_with_approval = ef.high_risk,
+            .read_sensitive_fields = read_sensitive,
+        },
+        .capabilities = try caps.toOwnedSlice(ctx.arena),
+        .to_change = try to_change.toOwnedSlice(ctx.arena),
+    });
+    return exit_ok;
+}
+
+fn joinOrNone(arena: std.mem.Allocator, items: []const []const u8) ![]const u8 {
+    if (items.len == 0) return "(none)";
+    return joinList(arena, items);
+}
+
+/// Turn a `config set` value string into the JSON value the config schema expects
+/// for `spec.kind`. Lists/object-maps are comma-separated; an object-map entry is
+/// `type:app/endpoint`. Returns InvalidConfigValue on a malformed value.
+fn buildConfigValue(arena: std.mem.Allocator, spec: ConfigKeySpec, raw: []const u8) error{ OutOfMemory, InvalidConfigValue }!std.json.Value {
+    const v = std.mem.trim(u8, raw, " \t");
+    switch (spec.kind) {
+        .forbidden => return error.InvalidConfigValue,
+        .boolean => {
+            if (eq(v, "1") or std.ascii.eqlIgnoreCase(v, "true") or std.ascii.eqlIgnoreCase(v, "yes") or std.ascii.eqlIgnoreCase(v, "on"))
+                return .{ .bool = true };
+            if (eq(v, "0") or std.ascii.eqlIgnoreCase(v, "false") or std.ascii.eqlIgnoreCase(v, "no") or std.ascii.eqlIgnoreCase(v, "off"))
+                return .{ .bool = false };
+            return error.InvalidConfigValue;
+        },
+        .integer => {
+            const n = std.fmt.parseInt(i64, v, 10) catch return error.InvalidConfigValue;
+            if (n < 0) return error.InvalidConfigValue;
+            return .{ .integer = n };
+        },
+        .string => {
+            if (v.len == 0) return error.InvalidConfigValue;
+            return .{ .string = v };
+        },
+        .list => {
+            var arr = std.json.Array.init(arena);
+            var it = std.mem.tokenizeAny(u8, v, ", \t");
+            while (it.next()) |tok| try arr.append(.{ .string = tok });
+            return .{ .array = arr };
+        },
+        .object_map => {
+            var obj: std.json.ObjectMap = .empty;
+            var it = std.mem.tokenizeAny(u8, v, ", \t");
+            while (it.next()) |entry| {
+                const ci = std.mem.indexOfScalar(u8, entry, ':') orelse return error.InvalidConfigValue;
+                const k = std.mem.trim(u8, entry[0..ci], " \t");
+                const path = std.mem.trim(u8, entry[ci + 1 ..], " \t");
+                if (k.len == 0 or path.len == 0) return error.InvalidConfigValue;
+                try obj.put(arena, k, .{ .string = path });
+            }
+            if (obj.count() == 0) return error.InvalidConfigValue;
+            return .{ .object = obj };
+        },
+    }
+}
+
+fn cmdConfigSet(ctx: *Context, rest: []const [:0]const u8) !u8 {
+    const note = findFlag(rest, "--note");
+    const pairs = try parseSet(ctx.arena, rest);
+    if (pairs.len == 0) {
+        try ctx.fail("config", .{
+            .kind = .invalid_args,
+            .message = "no settings given; use `nbxg config set <key=value> ...`",
+            .next_action = "run `nbxg config show` to see the keys you can change (e.g. auto_approve=true, allowed_fields=serial, creatable_resources=site)",
+        });
+        return exit_client;
+    }
+
+    const target = (try operatorConfigTarget(ctx)) orelse {
+        try ctx.fail("config", .{
+            .kind = .config_error,
+            .message = "cannot locate the operator config file (no HOME and no NBX_GUARD_CONFIG)",
+            .next_action = "set NBX_GUARD_CONFIG to the path of the config file to manage",
+        });
+        return exit_upstream;
+    };
+
+    // Build the proposed change object (validated, typed) and a from/to summary.
+    var changes_obj: std.json.ObjectMap = .empty;
+    const ChangeDetail = struct {
+        key: []const u8,
+        from: std.json.Value,
+        to: std.json.Value,
+        risk: []const u8,
+        impact: []const u8,
+    };
+    var details: std.ArrayList(ChangeDetail) = .empty;
+    var max_risk: []const u8 = "medium";
+
+    // Current file contents (for from-values + merge baseline).
+    const current_bytes = std.Io.Dir.cwd().readFileAlloc(ctx.io, target, ctx.gpa, .limited(1 << 20)) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => {
+            try ctx.fail("config", .{
+                .kind = .config_error,
+                .message = "failed to read the existing operator config file",
+                .next_action = "check the path and permissions of the config file",
+            });
+            return exit_upstream;
+        },
+    };
+    defer if (current_bytes) |b| ctx.gpa.free(b);
+    const current_root: ?std.json.Value = if (current_bytes) |b|
+        (std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, b, .{}) catch {
+            try ctx.fail("config", .{
+                .kind = .config_error,
+                .message = "the existing operator config file is not valid JSON",
+                .next_action = "fix or remove the malformed ~/.nbx-guard/config.json before changing it",
+            });
+            return exit_upstream;
+        })
+    else
+        null;
+    const current_obj: ?std.json.ObjectMap = if (current_root) |r| switch (r) {
+        .object => |o| o,
+        else => {
+            try ctx.fail("config", .{
+                .kind = .config_error,
+                .message = "the existing operator config file is not a JSON object",
+                .next_action = "the config file root must be a JSON object ({ ... })",
+            });
+            return exit_upstream;
+        },
+    } else null;
+
+    for (pairs) |kv| {
+        const spec = configKeySpec(kv.key) orelse {
+            try ctx.fail("config", .{
+                .kind = .invalid_args,
+                .message = "unknown config key",
+                .next_action = "run `nbxg config show` for the list of changeable keys; the raw NetBox token is never stored in config (use token_file/token_cmd)",
+            });
+            return exit_client;
+        };
+        if (spec.kind == .forbidden) {
+            try ctx.fail("config", .{
+                .kind = .config_error,
+                .message = "the raw NetBox token must never be written to config",
+                .next_action = "use `nbxg config set token_cmd=...` (keychain) or `token_file=...`, or keep NETBOX_TOKEN in the environment",
+            });
+            return exit_client;
+        }
+        const value = buildConfigValue(ctx.arena, spec, kv.value) catch {
+            try ctx.fail("config", .{
+                .kind = .invalid_args,
+                .message = "invalid value for config key",
+                .next_action = "booleans: true/false; integers: a non-negative number; lists: comma-separated (a,b); extra_resources: type:app/endpoint,type2:app/endpoint",
+            });
+            return exit_client;
+        };
+        try changes_obj.put(ctx.arena, kv.key, value);
+        const from = if (current_obj) |o| (o.get(kv.key) orelse std.json.Value{ .null = {} }) else std.json.Value{ .null = {} };
+        try details.append(ctx.arena, .{ .key = kv.key, .from = from, .to = value, .risk = spec.risk, .impact = spec.impact });
+        if (eq(spec.risk, "high")) max_risk = "high";
+    }
+    const changes_value = std.json.Value{ .object = changes_obj };
+
+    // Defense in depth: the merged file must stay valid and secret-free.
+    var merged: std.json.ObjectMap = .empty;
+    if (current_obj) |o| {
+        var it = o.iterator();
+        while (it.next()) |e| try merged.put(ctx.arena, e.key_ptr.*, e.value_ptr.*);
+    }
+    {
+        var it = changes_obj.iterator();
+        while (it.next()) |e| try merged.put(ctx.arena, e.key_ptr.*, e.value_ptr.*);
+    }
+    const merged_bytes = try std.json.Stringify.valueAlloc(ctx.arena, std.json.Value{ .object = merged }, .{ .whitespace = .indent_2 });
+    _ = config.parseExtJson(ctx.arena, merged_bytes) catch {
+        try ctx.fail("config", .{
+            .kind = .config_error,
+            .message = "the resulting config would be invalid",
+            .next_action = "check the key/value types; run `nbxg config show` for guidance",
+        });
+        return exit_client;
+    };
+
+    const base_values = blk: {
+        var bo: std.json.ObjectMap = .empty;
+        for (details.items) |d| try bo.put(ctx.arena, d.key, d.from);
+        break :blk std.json.Value{ .object = bo };
+    };
+
+    const store = Store.init(ctx);
+    try store.ensureDirs();
+    const lock = try store.acquireLock();
+    defer lock.release();
+
+    const now_ns = ctx.nowNanos();
+    const p: plan.Plan = .{
+        .plan_id = try ids.genId(ctx.arena, "plan", now_ns),
+        .request_id = try ids.genId(ctx.arena, "req", now_ns),
+        .plan_hash = try plan.computeHash(ctx.arena, config_resource_type, target, config_action, changes_value),
+        .resource_type = config_resource_type,
+        .resource_id = target,
+        .action = config_action,
+        .changes = changes_value,
+        .risk_level = max_risk,
+        // A governance change ALWAYS needs a human. It is never auto-approved,
+        // even with NBX_GUARD_AUTO_APPROVE on, so the agent cannot self-grant
+        // power: maybeAutoApprove is deliberately not called here.
+        .requires_approval = true,
+        .status = plan.status_pending_approval,
+        .created_at = nsToSecs(now_ns),
+        .netbox_url = ctx.config.netbox_url,
+        .base_values = base_values,
+    };
+    try plan.save(store, p);
+
+    try audit.append(store, .{
+        .ts = p.created_at,
+        .request_id = p.request_id,
+        .event = "plan_created",
+        .plan_id = p.plan_id,
+        .resource_type = p.resource_type,
+        .resource_id = p.resource_id,
+        .risk_level = p.risk_level,
+        .detail = note orelse "config_set",
+    });
+
+    try ctx.ok("config", .{
+        .plan = p,
+        .config_file = .{ .path = target, .exists = current_bytes != null },
+        .changes = details.items,
+        .risk_level = max_risk,
+        .note = "This is a PROPOSAL — nothing changed yet. A human must review and approve it; the agent must not approve its own config change. The change is auditable and reversible (a backup of the old config is kept on apply).",
+        .next_action = "ask an operator to review, then run `nbxg approve --plan <plan_id>` (human), and finally `nbxg apply --plan <plan_id>` to write the new config",
+    });
+    return exit_ok;
+}
+
+/// Apply an approved `config_set` plan: merge the proposed keys into the operator
+/// config file, after backing up the prior file under `<state_dir>/config-backups/`.
+/// Reached only from `cmdApply` once the plan is approved and its hash verified.
+/// The caller already holds the store lock.
+fn applyConfigChange(ctx: *Context, store: Store, p: *plan.Plan) !u8 {
+    const target = p.resource_id;
+
+    const changes_obj = switch (p.changes) {
+        .object => |o| o,
+        else => {
+            try ctx.fail("apply", .{
+                .kind = .plan_state_error,
+                .message = "config plan has no change set",
+                .next_action = "discard this plan and create a new one with `nbxg config set`",
+            });
+            return exit_client;
+        },
+    };
+
+    // Read the current file fresh at apply time (it may have changed since the
+    // proposal). Merge proposed keys over it; re-validate; never write a secret.
+    const current_bytes = std.Io.Dir.cwd().readFileAlloc(ctx.io, target, ctx.gpa, .limited(1 << 20)) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => {
+            try ctx.fail("apply", .{
+                .kind = .config_error,
+                .message = "failed to read the operator config file for update",
+                .next_action = "check the path and permissions of the config file",
+            });
+            return exit_upstream;
+        },
+    };
+    defer if (current_bytes) |b| ctx.gpa.free(b);
+
+    var merged: std.json.ObjectMap = .empty;
+    if (current_bytes) |b| {
+        const root = std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, b, .{}) catch {
+            try ctx.fail("apply", .{
+                .kind = .config_error,
+                .message = "the operator config file is not valid JSON",
+                .next_action = "fix or remove the malformed config file, then re-propose the change",
+            });
+            return exit_upstream;
+        };
+        switch (root) {
+            .object => |o| {
+                var it = o.iterator();
+                while (it.next()) |e| try merged.put(ctx.arena, e.key_ptr.*, e.value_ptr.*);
+            },
+            else => {
+                try ctx.fail("apply", .{
+                    .kind = .config_error,
+                    .message = "the operator config file is not a JSON object",
+                    .next_action = "the config file root must be a JSON object ({ ... })",
+                });
+                return exit_upstream;
+            },
+        }
+    }
+    {
+        var it = changes_obj.iterator();
+        while (it.next()) |e| {
+            if (eq(e.key_ptr.*, "netbox_token") or eq(e.key_ptr.*, "token")) {
+                try ctx.fail("apply", .{
+                    .kind = .config_error,
+                    .message = "refusing to write a raw token into config",
+                    .next_action = "discard this plan; use token_file/token_cmd instead",
+                });
+                return exit_client;
+            }
+            try merged.put(ctx.arena, e.key_ptr.*, e.value_ptr.*);
+        }
+    }
+
+    const merged_bytes = try std.json.Stringify.valueAlloc(ctx.arena, std.json.Value{ .object = merged }, .{ .whitespace = .indent_2 });
+    _ = config.parseExtJson(ctx.arena, merged_bytes) catch {
+        try ctx.fail("apply", .{
+            .kind = .config_error,
+            .message = "the resulting config would be invalid; nothing was written",
+            .next_action = "discard this plan and re-propose with valid values",
+        });
+        return exit_client;
+    };
+
+    const now_ns = ctx.nowNanos();
+    const request_id = try ids.genId(ctx.arena, "req", now_ns);
+
+    // Back up the prior file so the change is reversible.
+    try store.ensureSubdir(try store.path(&.{"config-backups"}));
+    const backup_name = try std.fmt.allocPrint(ctx.arena, "{s}.json", .{p.plan_id});
+    const backup_rel = try store.path(&.{ "config-backups", backup_name });
+    const prior_bytes = current_bytes orelse "{}\n";
+    try store.writeBytes(backup_rel, prior_bytes);
+
+    // Ensure the target directory exists (first-ever config write), then write
+    // the merged config atomically (temp + rename).
+    if (std.fs.path.dirname(target)) |d| std.Io.Dir.cwd().createDirPath(ctx.io, d) catch {};
+    store.writeBytes(target, merged_bytes) catch {
+        try audit.append(store, .{
+            .ts = nsToSecs(ctx.nowNanos()),
+            .request_id = request_id,
+            .event = "apply_failed",
+            .plan_id = p.plan_id,
+            .resource_type = p.resource_type,
+            .resource_id = target,
+            .risk_level = p.risk_level,
+            .detail = "failed to write config file",
+        });
+        try ctx.fail("apply", .{
+            .kind = .config_error,
+            .message = "failed to write the operator config file",
+            .next_action = "check the path and permissions; the prior config is backed up under <state_dir>/config-backups/",
+        });
+        return exit_upstream;
+    };
+
+    p.status = plan.status_applied;
+    p.backup_id = backup_rel;
+    try plan.save(store, p.*);
+
+    var keys: std.ArrayList([]const u8) = .empty;
+    {
+        var it = changes_obj.iterator();
+        while (it.next()) |e| try keys.append(ctx.arena, e.key_ptr.*);
+    }
+    const keys_joined = try joinList(ctx.arena, keys.items);
+
+    try audit.append(store, .{
+        .ts = nsToSecs(now_ns),
+        .request_id = request_id,
+        .event = "config_applied",
+        .plan_id = p.plan_id,
+        .approval_id = p.approval_id,
+        .backup_id = backup_rel,
+        .resource_type = p.resource_type,
+        .resource_id = target,
+        .risk_level = p.risk_level,
+        .detail = keys_joined,
+    });
+
+    try ctx.ok("apply", .{
+        .request_id = request_id,
+        .plan_id = p.plan_id,
+        .backup_id = backup_rel,
+        .status = p.status,
+        .action = config_action,
+        .config_file = target,
+        .applied = p.changes,
+        .diff = .{ .before = p.base_values, .after = p.changes },
+        .next_action = "the new configuration takes effect on the next `nbxg` run; to roll back, restore the backup file shown in backup_id over the config file",
+    });
+    return exit_ok;
+}
+
+// ---------------------------------------------------------------------------
 // plan
 // ---------------------------------------------------------------------------
 
@@ -1326,7 +2028,7 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
             .kind = .policy_denied,
             .message = "one or more fields are not writable by policy (default-deny)",
             .risk_level = eval.risk_level,
-            .next_action = "remove denied fields; only allowed/high-risk fields may be changed",
+            .next_action = "remove the denied field(s), or have an operator allow one: `nbxg config set allowed_fields=<field>` (no approval needed for it) or `high_risk_fields=<field>` (approval-gated). That proposal is itself human-approved and audited. See `nbxg config show`.",
         });
         return exit_client;
     }
@@ -1396,14 +2098,20 @@ fn cmdPlan(ctx: *Context, rest: []const [:0]const u8) !u8 {
         .risk_level = p.risk_level,
     });
 
-    const next_action = if (p.requires_approval)
+    var approved_plan = p;
+    const auto_approved = try maybeAutoApprove(ctx, store, &approved_plan);
+
+    const next_action = if (auto_approved)
+        "auto-approved (recorded in the audit log): run `nbxg apply --plan <plan_id>`"
+    else if (approved_plan.requires_approval)
         "high-risk: run `nbxg approve --plan <plan_id>`, then `apply`"
     else
         "low-risk: run `nbxg apply --plan <plan_id>`";
 
     try ctx.ok("plan", .{
-        .plan = p,
+        .plan = approved_plan,
         .evaluation = eval,
+        .auto_approved = auto_approved,
         .next_action = next_action,
     });
     return exit_ok;
@@ -1435,7 +2143,7 @@ fn cmdCreate(ctx: *Context, rest: []const [:0]const u8) !u8 {
         try ctx.fail("create", .{
             .kind = .policy_denied,
             .message = "creating this resource type is not permitted (default-deny)",
-            .next_action = "an operator must allow it: add the type to \"creatable_resources\" in ~/.nbx-guard/config.json (or set NBX_GUARD_CREATABLE_RESOURCES). Use \"*\" to allow any type. Every create still needs approval.",
+            .next_action = "have an operator allow it: `nbxg config set creatable_resources=<type>` (use * for any type). That proposal is human-approved and audited; then every create still needs its own approval. See `nbxg config show`.",
         });
         return exit_client;
     }
@@ -1488,10 +2196,20 @@ fn cmdCreate(ctx: *Context, rest: []const [:0]const u8) !u8 {
         .detail = "create",
     });
 
+    var approved_plan = p;
+    const auto_approved = try maybeAutoApprove(ctx, store, &approved_plan);
+
     try ctx.ok("create", .{
-        .plan = p,
-        .note = "create is approval-gated: review every field, then approve and apply",
-        .next_action = "run `nbxg approve --plan <plan_id>`, then `nbxg apply --plan <plan_id>`",
+        .plan = approved_plan,
+        .auto_approved = auto_approved,
+        .note = if (auto_approved)
+            "create was auto-approved (NBX_GUARD_AUTO_APPROVE); it is still backed up and audited, and its rollback is a delete via restore"
+        else
+            "create is approval-gated: review every field, then approve and apply",
+        .next_action = if (auto_approved)
+            "run `nbxg apply --plan <plan_id>`"
+        else
+            "run `nbxg approve --plan <plan_id>`, then `nbxg apply --plan <plan_id>`",
     });
     return exit_ok;
 }
@@ -1499,6 +2217,50 @@ fn cmdCreate(ctx: *Context, rest: []const [:0]const u8) !u8 {
 // ---------------------------------------------------------------------------
 // approve
 // ---------------------------------------------------------------------------
+
+/// If the operator enabled auto-approval (NBX_GUARD_AUTO_APPROVE / config
+/// `auto_approve`), satisfy the change-approval gate for `p` in place: record a
+/// real approval bound to the plan_hash (approver "auto"), flip the plan to
+/// approved, and append an `auto_approved` audit event. Every other control —
+/// plan-hash integrity, drift detection, pre-change backup, and the audit trail —
+/// is untouched, so `apply` behaves exactly as if a human had approved. Returns
+/// false (no-op) when the plan needs no approval or auto-approval is off. The
+/// caller must already hold the store lock.
+fn maybeAutoApprove(ctx: *Context, store: Store, p: *plan.Plan) !bool {
+    if (!p.requires_approval) return false;
+    if (!policy.autoApproveEnabled(ctx.env)) return false;
+
+    const now_ns = ctx.nowNanos();
+    const a: approval.Approval = .{
+        .approval_id = try ids.genId(ctx.arena, "appr", now_ns),
+        .plan_id = p.plan_id,
+        .plan_hash = p.plan_hash,
+        .resource_type = p.resource_type,
+        .resource_id = p.resource_id,
+        .risk_level = p.risk_level,
+        .status = approval.status_approved,
+        .approver = "auto",
+        .created_at = nsToSecs(now_ns),
+        .note = "auto-approved by NBX_GUARD_AUTO_APPROVE",
+    };
+    try approval.save(store, a);
+
+    p.status = plan.status_approved;
+    p.approval_id = a.approval_id;
+    try plan.save(store, p.*);
+
+    try audit.append(store, .{
+        .ts = a.created_at,
+        .request_id = try ids.genId(ctx.arena, "req", now_ns),
+        .event = "auto_approved",
+        .plan_id = p.plan_id,
+        .approval_id = a.approval_id,
+        .resource_type = p.resource_type,
+        .resource_id = p.resource_id,
+        .risk_level = p.risk_level,
+    });
+    return true;
+}
 
 fn cmdApprove(ctx: *Context, rest: []const [:0]const u8) !u8 {
     const plan_id = findFlag(rest, "--plan") orelse return failMissingFlag(ctx, "approve", "--plan");
@@ -1709,7 +2471,6 @@ fn cmdReject(ctx: *Context, rest: []const [:0]const u8) !u8 {
 
 fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
     const plan_id = findFlag(rest, "--plan") orelse return failMissingFlag(ctx, "apply", "--plan");
-    if (ctx.config.netbox_token == null) return failNoToken(ctx, "apply");
 
     const store = Store.init(ctx);
     try store.ensureDirs();
@@ -1785,6 +2546,10 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
         }
     }
 
+    // A governance change writes a local file, not NetBox: it needs no token and
+    // no NetBox round-trip. Route it once approved + integrity-verified.
+    if (eq(p.action, config_action)) return applyConfigChange(ctx, store, &p);
+
     // Re-validate the stored plan (defense in depth). `create` is gated by type
     // opt-in (no per-field policy — a new object needs identifying fields that are
     // not in the writable allow-list); `update` re-checks field policy.
@@ -1810,6 +2575,9 @@ fn cmdApply(ctx: *Context, rest: []const [:0]const u8) !u8 {
             return exit_client;
         }
     }
+
+    // NetBox-backed plans need a token; config plans returned earlier do not.
+    if (ctx.config.netbox_token == null) return failNoToken(ctx, "apply");
 
     var client = netbox.Client.init(ctx);
     defer client.deinit();
@@ -3268,7 +4036,7 @@ fn failUnknownType(ctx: *Context, command: []const u8, rtype: []const u8) !u8 {
     try ctx.fail(command, .{
         .kind = .invalid_args,
         .message = "unknown resource type",
-        .next_action = "run `nbxg describe` to list types (device, interface, ip-address, prefix, vlan, contact); an operator can add more via NBX_GUARD_EXTRA_RESOURCES",
+        .next_action = "run `nbxg describe` to list types (device, interface, ip-address, prefix, vlan, contact); to govern another type have an operator run `nbxg config set extra_resources=<type>:<app/endpoint>` (human-approved, audited)",
     });
     return exit_client;
 }
@@ -3407,4 +4175,39 @@ test "netboxDetail extracts DRF detail and ignores everything else" {
     try std.testing.expect(netboxDetail(a, "[1,2,3]") == null);
     try std.testing.expect(netboxDetail(a, "{\"detail\":\"\"}") == null);
     try std.testing.expect(netboxDetail(a, "{\"detail\":42}") == null);
+}
+
+test "buildConfigValue types values per key kind" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // boolean
+    const bspec = configKeySpec("auto_approve").?;
+    try std.testing.expect((try buildConfigValue(a, bspec, "true")).bool);
+    try std.testing.expect(!(try buildConfigValue(a, bspec, "off")).bool);
+    try std.testing.expectError(error.InvalidConfigValue, buildConfigValue(a, bspec, "maybe"));
+
+    // integer (non-negative)
+    const ispec = configKeySpec("http_timeout_ms").?;
+    try std.testing.expectEqual(@as(i64, 2500), (try buildConfigValue(a, ispec, "2500")).integer);
+    try std.testing.expectError(error.InvalidConfigValue, buildConfigValue(a, ispec, "-1"));
+
+    // list
+    const lspec = configKeySpec("creatable_resources").?;
+    const lv = try buildConfigValue(a, lspec, "site, vlan");
+    try std.testing.expectEqual(@as(usize, 2), lv.array.items.len);
+    try std.testing.expectEqualStrings("site", lv.array.items[0].string);
+
+    // object_map (type:endpoint)
+    const ospec = configKeySpec("extra_resources").?;
+    const ov = try buildConfigValue(a, ospec, "site:dcim/sites,tenant:tenancy/tenants");
+    try std.testing.expectEqualStrings("dcim/sites", ov.object.get("site").?.string);
+    try std.testing.expectError(error.InvalidConfigValue, buildConfigValue(a, ospec, "noseparator"));
+
+    // forbidden keys never build a value
+    try std.testing.expectError(error.InvalidConfigValue, buildConfigValue(a, configKeySpec("netbox_token").?, "x"));
+
+    // unknown key has no spec
+    try std.testing.expect(configKeySpec("definitely_not_a_key") == null);
 }

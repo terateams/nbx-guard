@@ -39,6 +39,14 @@ pub const Context = struct {
     env: *const std.process.Environ.Map,
     config: Config,
     out: *std.Io.Writer,
+    /// Where the effective NetBox token came from, for diagnostics (never the
+    /// token itself): "env" (NETBOX_TOKEN), "cmd" (NETBOX_TOKEN_CMD), "file"
+    /// (NETBOX_TOKEN_FILE), or "none". Set once by token resolution.
+    token_source: []const u8 = "none",
+    /// Absolute/resolved path of the operator config file actually loaded this
+    /// run, or null when none was found. Surfaced by `version` so an operator can
+    /// confirm the CLI is reading the config they expect.
+    config_path: ?[]const u8 = null,
 
     /// Current wall-clock time in nanoseconds.
     pub fn nowNanos(self: *const Context) i128 {
