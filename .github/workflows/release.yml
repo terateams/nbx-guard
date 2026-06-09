@@ -71,7 +71,6 @@ jobs:
             cp "zig-out/bin/nbxg" "pkg/${name}/"
           fi
           cp README.md "pkg/${name}/"
-          cp scripts/installer.sh "pkg/${name}/"
           cp skills/nbx-guard/SKILL.md "pkg/${name}/"
           cp skills/nbx-guard/config.default.json "pkg/${name}/"
           if [[ "$target" == *windows* ]]; then

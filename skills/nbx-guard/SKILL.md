@@ -32,21 +32,48 @@ description: >-
 
 ---
 
-## 安装
+## 安装与首次确认（Agent 必读）
+
+本技能可能以两种方式到达你，**动手前务必先确认 `nbxg` 二进制可用**：
+
+- **完整安装**（远程一键 `curl … install.sh | bash`，或仓库内 `make install`）：二进制 + 本文档都在。
+- **仅技能文档**（`npx skills add terateams/nbx-guard`）：只装了本 `SKILL.md`，**没有 `nbxg` 二进制**。
+
+### 第 0 步：探测二进制
+
+按顺序探测，任一成功即视为就绪：
 
 ```sh
-# 在仓库内（需要 zig 构建，或已存在 zig-out/bin/nbxg）：
-bash scripts/installer.sh
+nbxg version 2>/dev/null || ~/.agents/skills/nbx-guard/nbxg version
 ```
 
-安装器会：自动判断系统类型 → 询问安装目录（默认 `~/.agents/skills`）→ 若已存在则询问是否
-移除重装 → 安装 `nbxg` 与本 `SKILL.md` 到 `<目录>/nbx-guard/` → 尝试把 `nbxg` 链接进
-`~/.local/bin` → 最后执行 `nbxg --help` 验证。
+- 输出 JSON（含 `"version"`）→ 已就绪，按下文正常使用。
+- `command not found` / 找不到文件 / 非零退出 → **二进制缺失**（多半是 `npx skills` 只装了文档）。
 
-调用方式（二选一）：
+### 二进制缺失时：提案安装（Agent 提案 → 人类批准 → 执行）
 
-- 若已在 PATH：直接 `nbxg <command>`。
+**不要硬跑后续命令，也不要静默安装。** 遵循本技能一贯的治理姿态：
+
+1. 明确告诉用户：技能文档已就位，但缺 `nbxg` 二进制（`npx skills` 只装文档，不含二进制）。
+2. 提出这条**唯一的远程安装命令**，并说清它会做什么——到 GitHub Release 页面找与本机
+   架构匹配的预编译 `nbxg`（自动取 latest）→ 下载并校验 SHA256 → 装到
+   `~/.agents/skills/nbx-guard/` 并软链 `~/.local/bin` → 写默认配置（**绝不覆盖既有**）：
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/terateams/nbx-guard/main/scripts/install.sh | bash
+   ```
+
+   可选环境变量：`NBXG_VERSION=vX.Y.Z`（锁版本）、`NBXG_INSTALL_DIR` / `NBXG_BINDIR`（改目录）。
+3. **等用户明确批准后**再执行；装完重跑 `nbxg version` 确认就绪。
+4. 受限环境（不能管道执行、需手动核验）可手动到 Release 页面下载对应资产解压——
+   逐步演示见 [`examples/00-bootstrap-install.md`](examples/00-bootstrap-install.md)。
+
+### 调用方式（二选一）
+
+- 已在 PATH：直接 `nbxg <command>`。
 - 否则用绝对路径：`~/.agents/skills/nbx-guard/nbxg <command>`。
+
+> 端到端命令实操（发现、读、改、创建、回滚、配置提案）见 [`examples/`](examples/)。
 
 ---
 
@@ -472,5 +499,6 @@ nbxg list backups               # 已存储的备份
   它会比对二进制自带的版本、资源类型、策略字段与安装的 `SKILL.md`（以及源码 `build.zig.zon`
   版本），输出 `data.status`（`consistent` / `drift` / `skill_not_found`）、逐项 `checks`、
   人类可读的 `issues` 与修复建议 `next_action`；发现漂移时退出码为 `2`。如检测失败，按
-  `next_action` 重跑 `scripts/installer.sh` 重装，使二进制与文档对齐。默认会在二进制所在目录、
+  `next_action` 重装使二进制与文档对齐：仓库内 `make install`，或远程
+  `curl -fsSL https://raw.githubusercontent.com/terateams/nbx-guard/main/scripts/install.sh | bash`。默认会在二进制所在目录、
   `~/.agents/skills/nbx-guard/` 与当前仓库布局中查找 `SKILL.md`，也可用 `--skill <dir>` 指定。

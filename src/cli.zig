@@ -558,9 +558,9 @@ fn cmdDoctor(ctx: *Context, argv0: []const u8, rest: []const [:0]const u8) !u8 {
         "consistent";
 
     const next_action: []const u8 = if (!skill.found)
-        "install the skill (run scripts/installer.sh) or pass `nbxg doctor --skill <dir>` to point at SKILL.md"
+        "install nbxg: run `make install` in the repo, or `curl -fsSL https://raw.githubusercontent.com/terateams/nbx-guard/main/scripts/install.sh | bash`; or pass `nbxg doctor --skill <dir>` to point at an existing SKILL.md"
     else if (drift)
-        "reinstall so the binary and SKILL.md match: re-run scripts/installer.sh (rebuild with `zig build` first if needed)"
+        "reinstall so the binary and SKILL.md match: run `make install` in the repo, or re-run the remote installer `curl -fsSL https://raw.githubusercontent.com/terateams/nbx-guard/main/scripts/install.sh | bash`"
     else
         "installed binary and skill documentation agree";
 

@@ -5,7 +5,7 @@
 #   make uninstall        # 移除已安装的二进制与技能目录（保留 ~/.nbx-guard 数据）
 #   make                  # 显示全部可用目标
 #
-# 可用变量覆盖默认值（与 scripts/installer.sh 的约定保持一致）：
+# 可用变量覆盖默认值（与 scripts/install.sh 的约定保持一致）：
 #   PREFIX     安装前缀，默认 ~/.local        （二进制软链到 $(PREFIX)/bin）
 #   BINDIR     PATH 上的目录，默认 $(PREFIX)/bin
 #   SKILLS_DIR 技能根目录，默认 ~/.agents/skills（装到 <此目录>/nbx-guard/）
@@ -71,8 +71,11 @@ install-skill: build ## 安装技能目录（真实二进制 + SKILL.md + README
 	@install -m 0755 "$(BUILT_BIN)" "$(SKILL_DST)/$(BIN)"
 	@install -m 0644 "$(SKILL_SRC)/SKILL.md" "$(SKILL_DST)/SKILL.md"
 	@install -m 0644 "$(SKILL_SRC)/config.default.json" "$(SKILL_DST)/config.default.json"
+	@if [ -d "$(SKILL_SRC)/examples" ]; then \
+	  install -d "$(SKILL_DST)/examples"; \
+	  install -m 0644 "$(SKILL_SRC)/examples/"*.md "$(SKILL_DST)/examples/"; \
+	fi
 	@[ -f README.md ] && install -m 0644 README.md "$(SKILL_DST)/README.md" || true
-	@[ -f scripts/installer.sh ] && install -m 0755 scripts/installer.sh "$(SKILL_DST)/installer.sh" || true
 	@printf '✅ 技能文件已就位：%s\n' "$(SKILL_DST)"
 
 install-bin: install-skill ## 在 PATH（默认 ~/.local/bin）建指向技能目录二进制的软链接
