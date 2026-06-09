@@ -247,7 +247,7 @@ echo "================ 验收用例 ================"
 guard version
 check "version: 退出码 0" "$GRC" "0"
 check "version: ok=true" "$(j '.ok')" "true"
-check "version: 版本号" "$(j '.data.version')" "0.8.0"
+check "version: 版本号" "$(j '.data.version')" "0.9.0"
 check "version: token_configured=true" "$(j '.data.token_configured')" "true"
 
 # 2) help
