@@ -10,13 +10,9 @@
 
 nbx-guard 夹在 AI agent 和 NetBox 中间。agent 碰不到 NetBox API，只能请 nbxg 把一次改动先「写成计划」。之后放不放行、要不要人批、改前备份、记审计、能不能回滚，全由 nbxg 把关。哪怕 agent 自称有最高权限，也绕不过这些规则。
 
-```mermaid
-flowchart LR
-    Agent["Agent / LLM"] --> CLI["nbxg CLI"]
-    CLI --> API["NetBox REST API<br/>· NetBox Branching"]
-    CLI --> State["本地状态<br/>plans / backups / approvals / audit"]
-    Approver["人工审批者"] -->|审批| State
-```
+<p align="center">
+  <img src="workflow.png" alt="nbx-guard 工作流" width="720">
+</p>
 
 ## 核心保证
 
