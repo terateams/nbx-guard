@@ -8,7 +8,7 @@
 # ~/.agents/skills/nbx-guard/，软链到 ~/.local/bin，并部署默认配置（绝不覆盖既有配置）。
 # 全程非交互，适合直接管道执行；用环境变量定制（全部可选）：
 #
-#   NBXG_VERSION=v0.9.0      指定版本（默认取 latest）
+#   NBXG_VERSION=v0.10.0      指定版本（默认取 latest）
 #   NBXG_INSTALL_DIR=~/x     技能安装根目录（默认 ~/.agents/skills）
 #   NBXG_BINDIR=~/bin        PATH 软链目录（默认 ~/.local/bin）
 #

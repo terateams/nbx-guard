@@ -247,7 +247,7 @@ echo "================ 验收用例 ================"
 guard version
 check "version: 退出码 0" "$GRC" "0"
 check "version: ok=true" "$(j '.ok')" "true"
-check "version: 版本号" "$(j '.data.version')" "0.9.0"
+check "version: 版本号" "$(j '.data.version')" "0.10.0"
 check "version: token_configured=true" "$(j '.data.token_configured')" "true"
 
 # 2) help
@@ -521,6 +521,36 @@ guard restore --backup "$BKP"
 check "restore: 退出码 0" "$GRC" "0"
 check "restore: ok=true" "$(j '.ok')" "true"
 check "restore: NetBox 侧 description 已还原" "$(nb_field '.description')" "seed"
+
+# 8b) --data：字段也能用一整段 JSON 传（与 --set 同一条管道）。仅建 plan，不改 NetBox。
+guard plan ip-address "$IP_ID" --data '{"description":"acceptance-data"}'
+check "plan(--data 内联): 退出码 0" "$GRC" "0"
+check "plan(--data 内联): status=planned" "$(j '.data.plan.status')" "planned"
+check "plan(--data 内联): changes.description" "$(j '.data.plan.changes.description')" "acceptance-data"
+
+# --data @file：从文件读 JSON 对象（确定性，覆盖外部来源读取路径）
+printf '{"description":"acceptance-file"}' > "$STATE_DIR/data-input.json"
+guard plan ip-address "$IP_ID" --data @"$STATE_DIR/data-input.json"
+check "plan(--data @file): 退出码 0" "$GRC" "0"
+check "plan(--data @file): changes.description" "$(j '.data.plan.changes.description')" "acceptance-file"
+
+# --data-file <path>：等价写法
+guard plan ip-address "$IP_ID" --data-file "$STATE_DIR/data-input.json"
+check "plan(--data-file): changes.description" "$(j '.data.plan.changes.description')" "acceptance-file"
+
+# --data 打底 + --set 覆盖（从左到右，后者覆盖前者）
+guard plan ip-address "$IP_ID" --data '{"description":"from-data"}' --set description=from-set
+check "plan(--data+--set 覆盖): changes.description" "$(j '.data.plan.changes.description')" "from-set"
+
+# --data 顶层非对象 -> invalid_args（退出码 2）
+guard plan ip-address "$IP_ID" --data '[1,2,3]'
+check "plan(--data 非对象): 退出码 2" "$GRC" "2"
+check "plan(--data 非对象): error.kind=invalid_args" "$(j '.error.kind')" "invalid_args"
+
+# --data 非法 JSON -> invalid_args（退出码 2）
+guard plan ip-address "$IP_ID" --data '{not json'
+check "plan(--data 非法 JSON): 退出码 2" "$GRC" "2"
+check "plan(--data 非法 JSON): error.kind=invalid_args" "$(j '.error.kind')" "invalid_args"
 
 # 9) plan 高风险（status）—— 需要审批
 guard plan ip-address "$IP_ID" --set status=deprecated

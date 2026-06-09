@@ -215,8 +215,8 @@ nbxg snapshot <type> <id> [--fields basic|all] [--plan-read] [--plan <id>] [--ou
                                       只读快照单个资源（basic 默认脱敏，all 需读审批）
 nbxg describe [<type>] [--source options|openapi] [--refresh] [--offline]
                                       自描述：可写字段 / 输入输出 schema，实时对齐 NetBox
-nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
-nbxg create <type> --set k=v ...      创建新对象的计划（仅限管理员开启的类型；每次都要审批）
+nbxg plan <type> <id> --set k=v ... | --data '{...}'   创建变更计划（做策略 + 风险校验）
+nbxg create <type> --set k=v ... | --data '{...}'      创建新对象的计划（仅限管理员开启的类型；每次都要审批）
 nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
 nbxg approve-read --plan <id> [--note x]  审批一次敏感对象的整体读取（绑定 plan_hash）
 nbxg reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）
@@ -228,6 +228,29 @@ nbxg list <plans|approvals|backups>   列出本地状态
 
 `--set` 的值能当 JSON 就当 JSON 解析（数字、布尔、数组、对象），不行就按字符串——
 例如 `--set description="edge router"`、`--set tags='["core"]'`。
+
+### 字段也能用一整段 JSON 传
+
+`plan` 和 `create` 的字段，除了一个个 `--set`，也能用一整段 JSON 对象传进去——
+内联字符串、文件、或从 stdin 管道都行。字段多、或本来就拿着一份 JSON 时更省事：
+
+```sh
+# 内联 JSON 字符串
+nbxg create site --data '{"name":"POP3","slug":"pop3"}'
+
+# 从文件读（@ 前缀，或用 --data-file）
+nbxg create site --data @site.json
+nbxg create site --data-file site.json
+
+# 从 stdin 管道读（@-）
+echo '{"description":"edge router"}' | nbxg plan device 1 --data @-
+
+# --data 打底，再用 --set 覆盖个别字段（从左到右，后者覆盖前者）
+nbxg create site --data @site.json --set status=active
+```
+
+`--data` 顶层必须是一个 JSON 对象（`{字段: 值}`）；它和 `--set` 走的是同一条管道，
+策略、风险、`plan_hash`、漂移、备份、审计的行为完全一致，只是字段的写法不同。
 
 ## 工作流
 

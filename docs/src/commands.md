@@ -21,8 +21,8 @@ nbxg resolve <type> [--name|--slug|--address v | k=v]
 nbxg export <type> [选项]             只读批量导出匹配资源（full 档脱敏读敏感字段）
 nbxg snapshot <type> <id> [--fields basic|all] [--plan-read] [--plan <id>] [--out p]
                                       只读快照单个资源（basic 默认脱敏，all 需读审批）
-nbxg plan <type> <id> --set k=v ...   创建变更计划（做策略 + 风险校验）
-nbxg create <type> --set k=v ...      创建新对象的计划（仅限算子开启的类型；始终需审批）
+nbxg plan <type> <id> --set k=v ... | --data '{...}'   创建变更计划（做策略 + 风险校验）
+nbxg create <type> --set k=v ... | --data '{...}'      创建新对象的计划（仅限算子开启的类型；始终需审批）
 nbxg approve --plan <id> [--note x]   审批一个高风险 plan（绑定 plan_hash）
 nbxg approve-read --plan <id> [--note x]  审批一次敏感对象的整体读取（绑定 plan_hash）
 nbxg reject --plan <id> [--note x]    驳回一个 plan（之后 apply 会被拒绝）
@@ -288,12 +288,12 @@ nbxg describe device --source openapi  # 用 OpenAPI 描述文件同步（只读
 nbxg describe device --offline         # 仅静态 schema
 ```
 
-## `plan <type> <id> --set field=value ...`
+## `plan <type> <id> --set field=value ... | --data '{...}'`
 
 创建一个变更计划。需要 token。步骤：
 
 1. 校验资源类型。
-2. 把 `--set` 键值对解析成一个 changes 对象。
+2. 把 `--set` 键值对、和/或 `--data` 传入的 JSON 对象，合并成一个 changes 对象。
 3. 运行策略引擎；被拒绝的字段会中止流程并返回 `policy_denied`。
 4. 读取一次当前资源，记录将被改动字段的**基线值（base_values）**，供 apply 时做漂移检测。
 5. **空变更守卫**：若全部 `--set` 值已与当前状态完全一致，则返回 `no_change`（退出码 2），
@@ -317,14 +317,34 @@ nbxg plan vlan 10 --set custom_fields='{"x":1}'      # JSON 对象
 
 `--set k=v`、`--set=k=v`，以及裸写的 `k=v` 都被接受。
 
-## `create <type> --set field=value ...`
+### 用一整段 JSON 传字段（`--data`）
+
+字段多、或本来就拿着一份 JSON 时，可以用 `--data` 传一个 JSON 对象，免去逐个 `--set`：
+
+```sh
+nbxg create site --data '{"name":"POP3","slug":"pop3"}'        # 内联 JSON 字符串
+nbxg create site --data @site.json                            # 读文件（@ 前缀）
+nbxg create site --data-file site.json                        # 读文件（等价写法）
+echo '{"description":"edge router"}' | nbxg plan device 1 --data @-   # 读 stdin
+nbxg create site --data @site.json --set status=active        # 混用：--data 打底，--set 覆盖
+```
+
+要点：
+
+- `--data` 顶层必须是 JSON 对象（`{字段: 值}`）；数组/字符串/数字会被拒绝（`invalid_args`）。
+- 它和 `--set` 走**同一条**管道——策略、风险、`plan_hash`、漂移、备份、审计行为完全一致。
+- 可与 `--set` 自由混用，**从左到右、后者覆盖前者**（便于用一份模板打底，再覆盖个别字段）。
+- 非法 JSON → `invalid_args`「--data is not valid JSON」；源文件读不到 → `invalid_args`
+  「could not read --data source」。
+
+## `create <type> --set field=value ... | --data '{...}'`
 
 为**创建一个新对象**生成计划（不带 `<id>`）。治理点是**类型开关 + 强制审批 + 审计 + 可回滚**：
 
 1. 校验资源类型（必须有端点映射）。
 2. **类型默认拒绝**：仅当算子在 `creatable_resources` / `NBX_GUARD_CREATABLE_RESOURCES`
    中开启该类型（`*`=任意类型）时才放行，否则 `policy_denied`。
-3. 把 `--set` 解析成新对象的 changes（不做逐字段拒绝——新对象需要 `name`/`slug` 等标识字段，
+3. 把 `--set` 和/或 `--data` 解析成新对象的 changes（不做逐字段拒绝——新对象需要 `name`/`slug` 等标识字段，
    由 NetBox 校验必填/取值）。
 4. 生成 plan：`action=create`、`resource_id=(new)`（创建前还没有 id）、`risk_level=high`、
    `requires_approval=true`、`status=pending_approval`、`base_values=null`。
