@@ -19,13 +19,20 @@ concurrency:
   group: acceptance-${{ github.ref }}
   cancel-in-progress: true
 
+# mlugg/setup-zig 上游暂未迁移到 Node 24（其 action.yml 仍声明 node20）。
+# 在它发布 node24 版本前，用 GitHub 官方过渡开关让该 action 以 Node 24 运行，
+# 消除弃用告警；本仓库其余 action 均已升级到 node24，对它们无副作用。
+# 待 setup-zig 升级后删除此 env 并把它固定到新版本。
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   netbox-acceptance:
     name: NetBox acceptance
     runs-on: ubuntu-latest # 需要 Docker（macOS runner 没有 Docker）
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -43,7 +50,7 @@ jobs:
       # （并规避匿名拉取限流）。键随 docker-compose.yml 变化失效，镜像 tag 一改即自动重建。
       - name: Cache NetBox stack images
         id: stack-images
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/nbx-acc-images
           key: nbx-acc-images-${{ hashFiles('acceptance/docker-compose.yml') }}
