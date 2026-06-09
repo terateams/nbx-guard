@@ -339,3 +339,7 @@ zig build run -- version
 还是 MVP 阶段。开了 NetBox Branching，受控变更就经 `X-NetBox-Branch` 走某个分支；分支的
 `sync` / `merge` / `revert` 由 NetBox 自己的 Branching API 管。没开分支时，默认就是对 `main`
 直接 PATCH。
+
+## 许可证
+
+[MIT](./LICENSE) © terateams
