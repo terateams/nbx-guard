@@ -12,8 +12,10 @@
    不写入任何文件、不落盘、不提交**。禁止为此新建 `.md`/日志/笔记文件。
 2. **绝不削弱安全模型**：default-deny、`plan → approve → apply → audit` 四步、字段级治理、
    配置变更永不自动审批。详见第 5 节。任何放宽都必须由人类显式批准，而不是 agent 自作主张。
-3. **绝不提交任何机密**：token / 口令 / 真实内网 URL / 真实主机名都不许进代码、配置文件或提交历史。
-   配置文件里出现明文 `netbox_token`/`token` 会被代码主动拒绝（`error.SecretInConfig`）——不要绕过它。
+3. **绝不提交任何隐私 / 机密数据**（本仓库已公开，泄露会进入不可撤销的 Git 历史）：
+   token / 口令 / 真实内网或公网 URL / 主机名 / IP / 邮箱 / 客户与资产数据 / 个人绝对路径，
+   都不许进代码、配置、文档或提交历史。配置文件里出现明文 `netbox_token`/`token` 会被代码
+   主动拒绝（`error.SecretInConfig`）——不要绕过它。**提交前必须执行第 7 节《敏感数据围栏》的扫描。**
 4. **提交前三项必须全绿**（与 CI 完全一致）：
    - `zig build`
    - `zig build test`
@@ -66,7 +68,7 @@
 | `src/doctor.zig` | 自检：比对二进制与 `SKILL.md` 的资源类型/字段列表是否一致。 |
 
 其它目录：`skills/nbx-guard/`（Agent 手册 SKILL.md + 默认配置）、`docs/`（mdBook 文档）、
-`acceptance/`（真实 NetBox 端到端验收）、`scripts/installer.sh`（安装器）、`.github/workflows/`（CI）。
+`acceptance/`（真实 NetBox 端到端验收）、`scripts/install.sh`（远程一键安装器）、`.github/workflows/`（CI）。
 
 ---
 
@@ -81,6 +83,11 @@ zig fmt build.zig src             # 自动格式化（提交前务必跑）
 zig fmt --check build.zig src     # 仅检查（CI 用，不通过会 fail）
 zig build run -- <args>           # 直接运行 CLI
 ```
+
+> 开发者也可用根目录 `Makefile` 的快捷方式：`make build` / `make test` / `make fmt-check`，
+> 以及 `make install`（编译最新二进制 → 软链到 `~/.local/bin` → 安装技能目录到
+> `~/.agents/skills/nbx-guard/`，并部署默认配置但绝不覆盖既有）；`make uninstall` 反向移除。
+> `make` 裸跑列出全部目标。这些只是对上面 `zig` 命令的封装，CI 仍以 `zig` 命令为准。
 
 **实操坑（务必记住）**：`.zig-cache/o/...` 下的二进制可能是**旧的**。要拿到可靠的新二进制，
 用 `zig build --prefix ./zig-out` 后执行 `./zig-out/bin/nbxg`，不要直接跑 cache 里的产物。
@@ -180,6 +187,40 @@ gh run watch <run-id>                              # 跟踪（约 25 分钟）
   Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
   ```
 
+### 敏感数据围栏（硬性 · 本仓库已公开）
+
+> 仓库已公开，任何泄露都会进入**不可撤销**的 Git 历史。下列内容**绝对不允许**进入代码 / 配置 / 文档 / 提交历史：
+
+- 真实 token / 口令 / API key / 私钥 / 证书 / 任何凭据文件。
+- 真实 NetBox / 内网 / 生产环境的 URL 与主机名；真实公网或内网 IP。
+- 真实邮箱 / 电话 / 人名 / 客户名 / 资产清单等业务数据。
+- 个人绝对路径（如 `/Users/<name>`、`/home/<name>`）。
+- `.env`（`.env.example` 除外）、`.DS_Store`、编辑器 / OS 噪音、本地状态目录。
+
+**测试或文档需要"看起来真实"的值时，只用保留占位：**
+
+- IP 用 RFC 5737 文档段：`192.0.2.0/24`、`198.51.100.0/24`、`203.0.113.0/24`。
+- 域名用 `example.com` / `netbox.local`，URL 用 `http://localhost:8000`。
+- token 用一眼假的占位：`xxxx`、`0123…`、`nbt_badkey…`。
+
+**提交前必须执行这套扫描，任一命中都要先确认（是真泄露还是测试占位）再提交：**
+
+```bash
+# 1) 凭据：真实 token / 40-hex / Bearer 赋值（一眼假的测试值除外）
+git grep -nIE 'nbt_[A-Za-z0-9]{8,}|[0-9a-f]{40}|(Token|Bearer) [A-Za-z0-9]{16,}' -- . ':(exclude)*.min.js'
+# 2) 内网真实 IP（排除 RFC 5737 文档段后仍命中就要排查）
+git grep -nIE '(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)[0-9]' -- . ':(exclude)*.min.js'
+# 3) 个人绝对路径
+git grep -nIE '/Users/[a-z]|/home/[a-z]+/' -- . ':(exclude)*.min.js'
+# 4) 非占位邮箱
+git grep -nIE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' -- . | grep -viE 'example|noreply|@v[0-9]'
+# 5) 是否有被 .gitignore 漏掉、混进暂存区的噪音文件
+git status --porcelain
+```
+
+**跑 `nbxg` 演示 / 冒烟时**也要按第 3 节隔离环境（`env -u NETBOX_URL -u NETBOX_TOKEN ...`），
+避免把真实环境变量回显进日志、截图或提交内容。
+
 ---
 
 ## 8. 交付报告（强制）
@@ -215,7 +256,8 @@ gh run watch <run-id>                              # 跟踪（约 25 分钟）
 - ❌ 为放宽治理而修改默认 allow 列表（应走 `config set` 由人类审批）。
 - ❌ 绕过 plan/approve/apply 直接改 NetBox 或直接改状态文件。
 - ❌ 让配置变更走自动审批通道。
-- ❌ 把 token/口令/真实 URL 写进代码、配置或提交历史。
+- ❌ 把 token / 口令 / 真实 URL / 主机名 / IP / 邮箱 / 客户数据写进代码、配置、文档或提交历史。
+- ❌ 把 `.DS_Store` / `.env` / 本地状态 / 个人绝对路径等隐私或噪音文件提交进仓库（提交前按第 7 节《敏感数据围栏》扫描）。
 - ❌ 为"计划/笔记/进度/报告"创建 Markdown 文件（交付报告只在对话里给本人看）。
 - ❌ 与目标无关的大范围重构、重命名、格式化（制造噪音 diff）。
 - ❌ 未经用户明确同意就提交或 push。

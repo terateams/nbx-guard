@@ -12,12 +12,19 @@ on:
 permissions:
   contents: read
 
+# mlugg/setup-zig 上游暂未迁移到 Node 24（其 action.yml 仍声明 node20）。
+# 在它发布 node24 版本前，用 GitHub 官方过渡开关让该 action 以 Node 24 运行，
+# 消除弃用告警；本仓库其余 action 均已升级到 node24，对它们无副作用。
+# 待 setup-zig 升级后删除此 env 并把它固定到新版本。
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -40,7 +47,7 @@ jobs:
           - x86_64-windows
           - aarch64-windows
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -64,7 +71,6 @@ jobs:
             cp "zig-out/bin/nbxg" "pkg/${name}/"
           fi
           cp README.md "pkg/${name}/"
-          cp scripts/installer.sh "pkg/${name}/"
           cp skills/nbx-guard/SKILL.md "pkg/${name}/"
           cp skills/nbx-guard/config.default.json "pkg/${name}/"
           if [[ "$target" == *windows* ]]; then
@@ -75,7 +81,7 @@ jobs:
           ls -l out
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nbxg-${{ matrix.target }}
           path: out/*
@@ -89,7 +95,7 @@ jobs:
       contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -102,7 +108,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: ${{ inputs.tag || github.ref_name }}
