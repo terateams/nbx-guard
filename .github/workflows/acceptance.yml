@@ -1,27 +1,16 @@
 name: Acceptance
 
 # 针对真实 NetBox（容器）跑 nbx-guard 端到端验收。
-# 较重（需拉取 NetBox 镜像并执行数据库迁移），因此独立于快速 CI：
-# 仅在手动触发、每周定时，或改动 guard 逻辑/验收脚本时运行。
+# 较重（需拉取 NetBox 镜像并执行数据库迁移），且强依赖外部 NetBox 的真实行为，
+# 因此【不随 push / pull_request 自动运行】——避免拖慢或阻塞 PR 合并。
+# 触发方式：
+#   - 手动 / agent 完成任务后：`gh workflow run acceptance.yml --ref main`
+#   - 每周一定时一次，用于检测 NetBox API 漂移。
+# 验收失败作为单独事项跟进，不阻塞 PR 合并（见 Agent.md 第 3 节）。
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 3 * * 1" # 每周一 03:00 UTC，检测 NetBox API 漂移
-  push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "build.zig"
-      - "build.zig.zon"
-      - "acceptance/**"
-      - ".github/workflows/acceptance.yml"
-  pull_request:
-    paths:
-      - "src/**"
-      - "build.zig"
-      - "build.zig.zon"
-      - "acceptance/**"
-      - ".github/workflows/acceptance.yml"
 
 permissions:
   contents: read

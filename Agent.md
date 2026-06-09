@@ -22,6 +22,9 @@
    并用 `nbxg doctor` 确认 `"consistent": true`（见第 6 节）。
 6. **最小、外科手术式改动**：只动与目标相关的代码，不顺手重排/重命名无关内容，不制造与目标无关的 diff。
 7. **不替用户做提交/推送决定**：除非用户明确说"提交/push"，否则只改文件、保持工作区可供 review。
+8. **完成任务后触发 Acceptance 端到端验收**（仅当本次改了 `src/**` / `build.zig*` / `acceptance/**`）：
+   `gh workflow run acceptance.yml --ref main`。它**不随 PR/push 自动跑**（太慢、会阻塞合并）；
+   **验收失败作为单独事项跟进，不阻塞本次合并**。详见第 3 节。
 
 ---
 
@@ -96,8 +99,21 @@ env -u NETBOX_TOKEN -u NETBOX_URL -u NBX_GUARD_CONFIG \
 
 跑完**清理临时目录**。
 
-**验收（重）**：`acceptance/run.sh` 针对 Docker 里的真实 NetBox 容器跑端到端，见 `acceptance/README.md`。
-只有改了 `src/**`、`build.zig*`、`acceptance/**` 才需要；本地一般不必跑，CI 会按 path 触发。
+**验收（重，不随 PR 自动跑）**：端到端验收 `acceptance/run.sh` 针对 Docker 里的真实 NetBox 容器运行
+（见 `acceptance/README.md`）。因为它慢且依赖外部 NetBox，**已从 push / pull_request 触发中移除**，
+不再阻塞 PR 合并——工作流只保留 `workflow_dispatch`（手动触发）与每周一次的定时漂移检测。
+
+**完成任务后由你（agent）手动触发验收**（仅当本次改动涉及 `src/**` / `build.zig*` / `acceptance/**`）：
+
+```bash
+gh workflow run acceptance.yml --ref main          # 触发
+gh run list --workflow=acceptance.yml --limit 1    # 看最近一次（拿 run-id / 状态）
+gh run watch <run-id>                              # 跟踪（约 25 分钟）
+```
+
+**验收失败要单独处理**：它**不阻塞**当前任务 / PR 合并；把失败当作独立事项——在交付报告里记录
+（run 链接、失败现象、初步判断），再单独排查修复，并区分是「我们引入的回归」还是「NetBox API 漂移」。
+本地可选自测：`acceptance/run.sh`（需 Docker）。
 
 ---
 
@@ -183,7 +199,8 @@ env -u NETBOX_TOKEN -u NETBOX_URL -u NBX_GUARD_CONFIG \
 1. **目标**：这次要解决什么、验收标准是什么。
 2. **做了什么**：改了哪些文件 / 新增了哪些命令或逻辑（具体到模块/函数）。
 3. **为什么这么做**：关键设计决策与取舍，尤其是被否决的备选方案及原因。
-4. **验证证据**：`zig build` / `zig build test` / `zig fmt --check` 结果，跑过的 e2e/冒烟步骤与现象。
+4. **验证证据**：`zig build` / `zig build test` / `zig fmt --check` 结果，跑过的 e2e/冒烟步骤与现象；
+   若改了 `src/**`，是否已 `gh workflow run acceptance.yml` 触发 Acceptance（附 run 链接）、结果如何。
 5. **安全影响**：是否触及第 5 节的任何不变量，如何确保没有被削弱。
 6. **文档与一致性**：是否同步了 SKILL.md / docs，doctor 是否 `consistent`。
 7. **遗留与风险**：未覆盖的边界、已知限制、潜在隐患。
