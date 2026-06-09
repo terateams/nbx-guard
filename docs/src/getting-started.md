@@ -34,7 +34,7 @@ nbxg help
   "command": "version",
   "data": {
     "name": "nbxg",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "description": "Agent-only NetBox safe-change gateway (Zig)",
     "netbox_url": "http://localhost:8000",
     "branching": false,
