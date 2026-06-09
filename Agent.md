@@ -82,6 +82,11 @@ zig fmt --check build.zig src     # 仅检查（CI 用，不通过会 fail）
 zig build run -- <args>           # 直接运行 CLI
 ```
 
+> 开发者也可用根目录 `Makefile` 的快捷方式：`make build` / `make test` / `make fmt-check`，
+> 以及 `make install`（编译最新二进制 → 软链到 `~/.local/bin` → 安装技能目录到
+> `~/.agents/skills/nbx-guard/`，并部署默认配置但绝不覆盖既有）；`make uninstall` 反向移除。
+> `make` 裸跑列出全部目标。这些只是对上面 `zig` 命令的封装，CI 仍以 `zig` 命令为准。
+
 **实操坑（务必记住）**：`.zig-cache/o/...` 下的二进制可能是**旧的**。要拿到可靠的新二进制，
 用 `zig build --prefix ./zig-out` 后执行 `./zig-out/bin/nbxg`，不要直接跑 cache 里的产物。
 

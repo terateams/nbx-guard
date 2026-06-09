@@ -53,7 +53,24 @@ zig build run -- version
 
 ## 作为 Agent 技能安装
 
-把 `nbxg` 及其技能说明安装给你的 Agent，使其能驱动受控的 NetBox 变更流程：
+把 `nbxg` 及其技能说明安装给你的 Agent，使其能驱动受控的 NetBox 变更流程。
+
+### 从源码一键安装（开发者友好）
+
+在仓库内一条命令即可**编译最新二进制 → 软链到 PATH → 安装技能目录**（需 **Zig 0.16.0**）：
+
+```sh
+make install     # 编译 → 软链 ~/.local/bin/nbxg → 装技能到 ~/.agents/skills/nbx-guard/
+make uninstall   # 移除二进制与技能目录（保留 ~/.nbx-guard 用户数据）
+make             # 查看全部目标（build / test / fmt / clean ...）
+```
+
+可覆盖默认位置，例如 `make install PREFIX=/usr/local SKILLS_DIR=~/skills`。
+安装同时会把默认算子配置写入 `~/.nbx-guard/config.json`（**绝不覆盖**既有配置）。
+
+### 跨平台 / 从发布包安装（installer.sh）
+
+没有 Zig，或想从 GitHub Release 下载预编译包时，用安装脚本：
 
 ```sh
 bash scripts/installer.sh
